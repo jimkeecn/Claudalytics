@@ -1,0 +1,15 @@
+{
+  "name": "hooks-capture-server",
+  "version": "1.0.0",
+  "description": "Captures raw Claude Code hook events for schema inspection",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@opentelemetry/exporter-logs-otlp-http": "^0.214.0",
+    "@opentelemetry/resources": "^2.6.1",
+    "@opentelemetry/sdk-logs": "^0.214.0",
+    "@opentelemetry/semantic-conventions": "^1.40.0"
+  }
+}

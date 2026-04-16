@@ -1,0 +1,41 @@
+# MCP server config (contains API tokens)
+.mcp.json
+
+# Claude Code local settings and user-specific files
+.claude/settings.json
+.claude/settings.local.json
+.claude/settings.local.json.backup
+.claude/analytics.json
+.claude/.backup/
+.claude/hooks/
+.claude/otel_server/
+.claude/proxy_server/
+.claude/skills-lock.json
+
+# Plugin environment overrides
+plugin/.env
+
+# Docker compose overrides (user-specific port remapping)
+docker-compose.override.yaml
+docker-compose.override.yml
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Logs
+*.log
+docker-stack/hooks-server/logs/
+docker-stack/hooks-server/node_modules/

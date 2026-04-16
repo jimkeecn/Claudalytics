@@ -1,0 +1,2480 @@
+{
+  "uid": "claude-otel-overview",
+  "title": "Claude Analytics - OTel Overview",
+  "tags": [
+    "claude-analytics",
+    "otel"
+  ],
+  "refresh": "30s",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "schemaVersion": 39,
+  "version": 6,
+  "templating": {
+    "list": [
+      {
+        "name": "project",
+        "label": "Project",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "clickhouse-analytics"
+        },
+        "query": "SELECT DISTINCT project_name FROM claude_analytics.sessions FINAL ORDER BY project_name",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "session",
+        "label": "Session",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "clickhouse-analytics"
+        },
+        "query": "SELECT session_id, concat(formatDateTime(max(last_event_at), '%Y-%m-%d %H:%i', '${__timezone}'), '  ·  ', substring(session_id, 1, 8)) AS label FROM claude_analytics.sessions FINAL WHERE $__conditionalAll(project_name IN (${project:singlequote}), $project) GROUP BY session_id ORDER BY max(last_event_at) DESC",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "sort": 0,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Total Sessions",
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT count(DISTINCT session_id) AS sessions FROM claude_analytics.sessions FINAL WHERE $__conditionalAll(project_name IN (${project:singlequote}), $project)",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "title": "Total OTel Events",
+      "type": "stat",
+      "gridPos": {
+        "x": 4,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT count() AS events FROM claude_analytics.otel_logs WHERE $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session)",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 27,
+      "title": "$ per 1K Output Tokens [KAN-38]",
+      "description": "Unit economics health check: total spend divided by thousands of output tokens. Tracks cache efficiency and pricing drift regardless of usage volume.",
+      "type": "stat",
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT if(sum(toUInt64OrZero(LogAttributes['output_tokens'])) = 0, NULL, sum(toFloat64OrZero(LogAttributes['cost_usd'])) / (sum(toUInt64OrZero(LogAttributes['output_tokens'])) / 1000.0)) AS cost_per_1k_out FROM claude_analytics.otel_logs WHERE LogAttributes['event.name']='api_request' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session)",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "unit": "currencyUSD",
+          "decimals": 4,
+          "noValue": "—",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "purple",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "Events Over Time",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 60,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT $__timeInterval(Timestamp) AS time, count() AS events FROM claude_analytics.otel_logs WHERE $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY time ORDER BY time",
+          "format": 2,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "single"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "Model Usage",
+      "type": "barchart",
+      "gridPos": {
+        "x": 12,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT LogAttributes['model'] AS model, count() AS count FROM claude_analytics.otel_logs WHERE $__timeFilter(Timestamp) AND LogAttributes['model'] != '' AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY model ORDER BY count DESC",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "barWidth": 0.7,
+        "groupWidth": 0.7,
+        "tooltip": {
+          "mode": "single"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "xTickLabelRotation": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto",
+            "fillOpacity": 80
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "title": "Token Usage Over Time",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT $__timeInterval(Timestamp) AS time, sum(toUInt64OrZero(LogAttributes['input_tokens'])) AS input_tokens, sum(toUInt64OrZero(LogAttributes['output_tokens'])) AS output_tokens, sum(toUInt64OrZero(LogAttributes['cache_read_tokens'])) AS cache_read_tokens FROM claude_analytics.otel_logs WHERE $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY time ORDER BY time",
+          "format": 2,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "title": "Tool Usage",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT LogAttributes['tool_name'] AS tool_name, count() AS calls, countIf(LogAttributes['success'] = 'true') AS successes, countIf(LogAttributes['success'] != 'true') AS failures, round(countIf(LogAttributes['success'] = 'true') / count() * 100, 1) AS success_rate FROM claude_analytics.otel_logs WHERE $__timeFilter(Timestamp) AND LogAttributes['tool_name'] != '' AND LogAttributes['event.name'] = 'tool_result' AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY tool_name ORDER BY calls DESC",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "calls",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "success_rate"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 80
+                    },
+                    {
+                      "color": "green",
+                      "value": 95
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 8,
+      "title": "Cost Over Time",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT $__timeInterval(Timestamp) AS time, sum(toFloat64OrZero(LogAttributes['cost_usd'])) AS cost_usd FROM claude_analytics.otel_logs WHERE $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY time ORDER BY time",
+          "format": 2,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "single"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "unit": "currencyUSD",
+          "decimals": 4
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "title": "Skills Used",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 84,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT JSONExtractString(LogAttributes['tool_input'], 'skill') AS skill_name, count() AS calls, countIf(LogAttributes['success'] = 'true') AS successes, countIf(LogAttributes['success'] != 'true') AS failures, round(countIf(LogAttributes['success'] = 'true') / count() * 100, 1) AS success_rate, round(avg(toFloat64OrZero(LogAttributes['duration_ms'])), 0) AS avg_duration_ms, sum(toUInt64OrZero(LogAttributes['tool_result_size_bytes'])) AS total_result_bytes FROM claude_analytics.otel_logs WHERE $__timeFilter(Timestamp) AND LogAttributes['tool_name'] = 'Skill' AND LogAttributes['event.name'] = 'tool_result' AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY skill_name ORDER BY calls DESC",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "calls",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "success_rate"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 80
+                    },
+                    {
+                      "color": "green",
+                      "value": 95
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "avg_duration_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total_result_bytes"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "decbytes"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 10,
+      "title": "Websites Visited [KAN-39]",
+      "description": "URLs visited via WebFetch, WebSearch, and Bash commands. Powered by websites_visited MVs — no JSON parsing or UNION at query time.",
+      "type": "table",
+      "gridPos": {
+        "x": 8,
+        "y": 84,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT source_tool AS tool, timestamp AS time, url, http_status AS status, fetch_bytes AS bytes, domain FROM claude_analytics.websites_visited WHERE $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) ORDER BY time DESC LIMIT 200",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "time",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "success"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-text"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "true": {
+                        "color": "green",
+                        "text": "OK"
+                      },
+                      "false": {
+                        "color": "red",
+                        "text": "FAIL"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "duration_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "result_bytes"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "decbytes"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 11,
+      "title": "MCP Server Calls",
+      "type": "table",
+      "gridPos": {
+        "x": 16,
+        "y": 84,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT JSONExtractString(LogAttributes['tool_parameters'], 'mcp_server_name') AS mcp_server, JSONExtractString(LogAttributes['tool_parameters'], 'mcp_tool_name') AS mcp_tool, LogAttributes['mcp_server_scope'] AS scope, count() AS calls, countIf(LogAttributes['success'] = 'true') AS successes, countIf(LogAttributes['success'] != 'true') AS failures, round(countIf(LogAttributes['success'] = 'true') / count() * 100, 1) AS success_rate, round(avg(toFloat64OrZero(LogAttributes['duration_ms'])), 0) AS avg_duration_ms, sum(toUInt64OrZero(LogAttributes['tool_result_size_bytes'])) AS total_result_bytes, countIf(LogAttributes['error'] != '') AS errors FROM claude_analytics.otel_logs WHERE $__timeFilter(Timestamp) AND LogAttributes['tool_name'] = 'mcp_tool' AND LogAttributes['event.name'] = 'tool_result' AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY mcp_server, mcp_tool, scope ORDER BY calls DESC",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "calls",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "success_rate"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 80
+                    },
+                    {
+                      "color": "green",
+                      "value": 95
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "avg_duration_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total_result_bytes"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "decbytes"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 12,
+      "title": "Tool Decisions: Accept vs Reject (per tool, per source) [KAN-21]",
+      "type": "barchart",
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT LogAttributes['tool_name'] AS tool, concat(LogAttributes['source'], ':', LogAttributes['decision']) AS src_decision, count() AS n FROM claude_analytics.otel_logs WHERE LogAttributes['event.name'] = 'tool_decision' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY tool, src_decision ORDER BY n DESC",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 80
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "title": "Cache Hit-Rate Trend [KAN-25]",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT $__timeInterval(Timestamp) AS time, sum(toUInt64OrZero(LogAttributes['cache_read_tokens'])) / greatest(sum(toUInt64OrZero(LogAttributes['cache_read_tokens'])) + sum(toUInt64OrZero(LogAttributes['input_tokens'])), 1) AS hit_rate FROM claude_analytics.otel_logs WHERE LogAttributes['event.name'] = 'api_request' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY time ORDER BY time",
+          "format": 2,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "single"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15
+          },
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.2
+              },
+              {
+                "color": "green",
+                "value": 0.6
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 14,
+      "title": "API Latency Percentiles per Model [KAN-22]",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 44,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT $__timeInterval(Timestamp) AS time, quantileIf(0.50)(toUInt32OrZero(LogAttributes['duration_ms']), LogAttributes['model']='claude-opus-4-6') AS \"opus p50\", quantileIf(0.95)(toUInt32OrZero(LogAttributes['duration_ms']), LogAttributes['model']='claude-opus-4-6') AS \"opus p95\", quantileIf(0.99)(toUInt32OrZero(LogAttributes['duration_ms']), LogAttributes['model']='claude-opus-4-6') AS \"opus p99\", quantileIf(0.50)(toUInt32OrZero(LogAttributes['duration_ms']), LogAttributes['model']='claude-haiku-4-5-20251001') AS \"haiku p50\", quantileIf(0.95)(toUInt32OrZero(LogAttributes['duration_ms']), LogAttributes['model']='claude-haiku-4-5-20251001') AS \"haiku p95\", quantileIf(0.99)(toUInt32OrZero(LogAttributes['duration_ms']), LogAttributes['model']='claude-haiku-4-5-20251001') AS \"haiku p99\" FROM claude_analytics.otel_logs WHERE LogAttributes['event.name'] = 'api_request' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY time ORDER BY time",
+          "format": 2,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 5
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 15,
+      "title": "Tool Execution Latency Percentiles [KAN-23]",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 52,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT LogAttributes['tool_name'] AS tool, count() AS invocations, round(quantile(0.50)(toUInt32OrZero(LogAttributes['duration_ms'])), 0) AS p50_ms, round(quantile(0.95)(toUInt32OrZero(LogAttributes['duration_ms'])), 0) AS p95_ms, max(toUInt32OrZero(LogAttributes['duration_ms'])) AS max_ms FROM claude_analytics.otel_logs WHERE LogAttributes['event.name'] = 'tool_result' AND LogAttributes['tool_name'] != '' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY tool ORDER BY p95_ms DESC",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "p95_ms",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p50_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p95_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "max_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 16,
+      "title": "Slowest WebFetch URLs [KAN-23]",
+      "type": "table",
+      "gridPos": {
+        "x": 12,
+        "y": 52,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT JSONExtractString(LogAttributes['tool_input'], 'url') AS url, count() AS hits, round(quantile(0.50)(toUInt32OrZero(LogAttributes['duration_ms'])), 0) AS p50_ms, round(quantile(0.95)(toUInt32OrZero(LogAttributes['duration_ms'])), 0) AS p95_ms, max(toUInt32OrZero(LogAttributes['duration_ms'])) AS max_ms FROM claude_analytics.otel_logs WHERE LogAttributes['event.name'] = 'tool_result' AND LogAttributes['tool_name'] = 'WebFetch' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY url ORDER BY p95_ms DESC LIMIT 20",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "p95_ms",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p50_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p95_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "max_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 17,
+      "title": "Lines of Code per User (added vs removed) [KAN-26]",
+      "type": "barchart",
+      "gridPos": {
+        "x": 0,
+        "y": 110,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT Attributes['user.email'] AS user, sumIf(Value, Attributes['type'] = 'added') AS lines_added, sumIf(Value, Attributes['type'] = 'removed') AS lines_removed FROM claude_analytics.otel_metrics_sum WHERE MetricName = 'claude_code.lines_of_code.count' AND $__timeFilter(TimeUnix) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(Attributes['session.id'] IN (${session:singlequote}), $session) GROUP BY user ORDER BY (lines_added + lines_removed) DESC",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 80
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 18,
+      "title": "Prompt Length Distribution [KAN-27]",
+      "type": "barchart",
+      "gridPos": {
+        "x": 12,
+        "y": 110,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT toString(floor(toUInt32OrZero(LogAttributes['prompt_length']) / 100) * 100) AS bucket_chars, count() AS prompts FROM claude_analytics.otel_logs WHERE LogAttributes['event.name'] = 'user_prompt' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY bucket_chars ORDER BY toUInt32OrZero(bucket_chars)",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "orientation": "vertical",
+        "tooltip": {
+          "mode": "single"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 80
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 20,
+      "title": "Top Expensive Sessions [KAN-28]",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT LogAttributes['session.id'] AS session_id, LogAttributes['user.email'] AS user, count() AS api_calls, round(sum(toFloat64OrZero(LogAttributes['cost_usd'])), 4) AS cost_usd, sum(toUInt64OrZero(LogAttributes['input_tokens']) + toUInt64OrZero(LogAttributes['output_tokens'])) AS tokens FROM claude_analytics.otel_logs WHERE LogAttributes['event.name'] = 'api_request' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY session_id, user ORDER BY cost_usd DESC LIMIT 20",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "cost_usd",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cost_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 21,
+      "title": "Top Expensive Prompts [KAN-28]",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 36,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "WITH prompt_texts AS (SELECT LogAttributes['prompt.id'] AS pid, any(LogAttributes['session.id']) AS session_id, any(LogAttributes['prompt']) AS prompt_text FROM claude_analytics.otel_logs WHERE LogAttributes['event.name'] = 'user_prompt' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY pid) SELECT substring(pt.session_id, 1, 8) AS session, substring(pt.prompt_text, 1, 120) AS prompt, any(l.LogAttributes['user.email']) AS user, count() AS api_calls, round(sum(toFloat64OrZero(l.LogAttributes['cost_usd'])), 4) AS cost_usd, sum(toUInt64OrZero(l.LogAttributes['input_tokens']) + toUInt64OrZero(l.LogAttributes['output_tokens'])) AS tokens FROM claude_analytics.otel_logs l LEFT JOIN prompt_texts pt ON l.LogAttributes['prompt.id'] = pt.pid WHERE l.LogAttributes['event.name'] = 'api_request' AND l.LogAttributes['prompt.id'] != '' AND $__timeFilter(l.Timestamp) AND $__conditionalAll(l.ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(l.LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY session, prompt ORDER BY cost_usd DESC LIMIT 20",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "cost_usd",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cost_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 22,
+      "title": "Cost per Active Minute [KAN-29]",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 28,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "WITH cost AS (SELECT toStartOfHour(Timestamp) AS t, sum(toFloat64OrZero(LogAttributes['cost_usd'])) AS cost_usd FROM claude_analytics.otel_logs WHERE LogAttributes['event.name'] = 'api_request' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY t), active AS (SELECT toStartOfHour(TimeUnix) AS t, sum(Value) AS active_sec FROM claude_analytics.otel_metrics_sum WHERE MetricName = 'claude_code.active_time.total' AND $__timeFilter(TimeUnix) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(Attributes['session.id'] IN (${session:singlequote}), $session) GROUP BY t) SELECT c.t AS time, c.cost_usd / greatest(a.active_sec / 60, 1) AS cost_per_active_minute FROM cost c LEFT JOIN active a ON c.t = a.t ORDER BY time",
+          "format": 2,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "single"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "currencyUSD",
+          "decimals": 4
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 24,
+      "title": "Commits vs Cost per Day [KAN-31]",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 36,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "WITH commits AS (SELECT toStartOfDay(TimeUnix) AS day, sum(Value) AS commits FROM claude_analytics.otel_metrics_sum WHERE MetricName = 'claude_code.commit.count' AND $__timeFilter(TimeUnix) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(Attributes['session.id'] IN (${session:singlequote}), $session) GROUP BY day), cost AS (SELECT toStartOfDay(Timestamp) AS day, sum(toFloat64OrZero(LogAttributes['cost_usd'])) AS cost_usd FROM claude_analytics.otel_logs WHERE LogAttributes['event.name'] = 'api_request' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY day) SELECT coalesce(c.day, x.day) AS time, c.commits AS commits, x.cost_usd AS cost_usd FROM commits c FULL OUTER JOIN cost x ON c.day = x.day ORDER BY time",
+          "format": 2,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cost_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "commits"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 26,
+      "title": "Session History [KAN-50]",
+      "description": "Merged timeline from OTel (prompts, API calls) and Hooks (tools, subagents, tasks, permissions, errors). Filter by actor/kind column headers. Subagent internal tools prefixed with ↳.",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 68,
+        "w": 24,
+        "h": 16
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT Timestamp AS time, LogAttributes['event.name'] AS event, multiIf(LogAttributes['event.name'] IN ('user_prompt', 'hooks.UserPromptSubmit', 'hooks.PermissionRequest', 'hooks.PermissionDenied', 'hooks.Elicitation', 'hooks.ElicitationResult', 'feedback_survey'), 'user', LogAttributes['event.name'] IN ('api_request', 'api_error', 'hooks.Stop', 'hooks.StopFailure'), 'assistant', LogAttributes['event.name'] IN ('hooks.SubagentStart', 'hooks.SubagentStop', 'hooks.TeammateIdle'), 'agent', LogAttributes['event.name'] IN ('tool_result', 'tool_decision', 'hooks.PreToolUse', 'hooks.PostToolUse', 'hooks.PostToolUseFailure'), 'tool', LogAttributes['event.name'] IN ('hooks.SessionStart', 'hooks.SessionEnd', 'hooks.Notification', 'hooks.InstructionsLoaded', 'hooks.TaskCreated', 'hooks.TaskCompleted', 'hooks.ConfigChange', 'hooks.CwdChanged', 'hooks.FileChanged', 'hooks.WorktreeCreate', 'hooks.WorktreeRemove', 'hooks.PreCompact', 'hooks.PostCompact', 'skill_activated'), 'system', 'other') AS actor, multiIf(LogAttributes['event.name'] = 'user_prompt', 'prompt', LogAttributes['event.name'] = 'hooks.UserPromptSubmit', 'prompt submit', LogAttributes['event.name'] = 'api_request', 'api_call', LogAttributes['event.name'] = 'api_error', 'api_error', LogAttributes['event.name'] = 'tool_result', concat(LogAttributes['tool_name'], ' result'), LogAttributes['event.name'] = 'tool_decision', concat(LogAttributes['tool_name'], ' decision'), LogAttributes['event.name'] = 'feedback_survey', 'feedback', LogAttributes['event.name'] = 'skill_activated', 'skill', LogAttributes['event.name'] = 'hooks.PreToolUse' AND LogAttributes['agent.id'] != '', concat('↳ ', LogAttributes['tool_name'], ' pre'), LogAttributes['event.name'] = 'hooks.PreToolUse', concat(LogAttributes['tool_name'], ' pre'), LogAttributes['event.name'] = 'hooks.PostToolUse' AND LogAttributes['agent.id'] != '', concat('↳ ', LogAttributes['tool_name']), LogAttributes['event.name'] = 'hooks.PostToolUse', LogAttributes['tool_name'], LogAttributes['event.name'] = 'hooks.PostToolUseFailure' AND LogAttributes['agent.id'] != '', concat('↳ ', LogAttributes['tool_name'], ' FAIL'), LogAttributes['event.name'] = 'hooks.PostToolUseFailure', concat(LogAttributes['tool_name'], ' FAIL'), LogAttributes['event.name'] = 'hooks.SubagentStart', concat(LogAttributes['agent.type'], ' start'), LogAttributes['event.name'] = 'hooks.SubagentStop', concat(LogAttributes['agent.type'], ' stop'), LogAttributes['event.name'] = 'hooks.TeammateIdle', 'teammate idle', LogAttributes['event.name'] = 'hooks.TaskCreated', 'task created', LogAttributes['event.name'] = 'hooks.TaskCompleted', 'task done', LogAttributes['event.name'] = 'hooks.InstructionsLoaded', 'instructions', LogAttributes['event.name'] = 'hooks.PermissionRequest', 'permission', LogAttributes['event.name'] = 'hooks.PermissionDenied', 'permission denied', LogAttributes['event.name'] = 'hooks.Notification', 'notification', LogAttributes['event.name'] = 'hooks.SessionStart', 'session start', LogAttributes['event.name'] = 'hooks.SessionEnd', 'session end', LogAttributes['event.name'] = 'hooks.Stop', 'stop', LogAttributes['event.name'] = 'hooks.StopFailure', 'stop fail', LogAttributes['event.name'] = 'hooks.ConfigChange', 'config', LogAttributes['event.name'] = 'hooks.CwdChanged', 'cwd changed', LogAttributes['event.name'] = 'hooks.FileChanged', 'file changed', LogAttributes['event.name'] = 'hooks.WorktreeCreate', 'worktree create', LogAttributes['event.name'] = 'hooks.WorktreeRemove', 'worktree remove', LogAttributes['event.name'] = 'hooks.PreCompact', 'pre compact', LogAttributes['event.name'] = 'hooks.PostCompact', 'post compact', LogAttributes['event.name'] = 'hooks.Elicitation', 'elicitation', LogAttributes['event.name'] = 'hooks.ElicitationResult', 'elicitation result', '?') AS kind, multiIf(LogAttributes['event.name'] = 'user_prompt', substring(LogAttributes['prompt'], 1, 200), LogAttributes['event.name'] = 'hooks.UserPromptSubmit', substring(LogAttributes['prompt'], 1, 200), LogAttributes['event.name'] = 'api_request', concat(LogAttributes['model'], ' · ', LogAttributes['duration_ms'], 'ms · ', LogAttributes['input_tokens'], '+', LogAttributes['output_tokens'], 'tok · $', substring(LogAttributes['cost_usd'], 1, 7)), LogAttributes['event.name'] = 'api_error', LogAttributes['error'], LogAttributes['event.name'] = 'tool_result', concat(LogAttributes['duration_ms'], 'ms · success=', LogAttributes['success'], ' · ', LogAttributes['tool_result_size_bytes'], 'B'), LogAttributes['event.name'] = 'tool_decision', concat(LogAttributes['decision'], ' (', LogAttributes['source'], ')'), LogAttributes['event.name'] = 'skill_activated', LogAttributes['skill_name'], LogAttributes['event.name'] = 'feedback_survey', LogAttributes['rating'], LogAttributes['event.name'] = 'hooks.PreToolUse', substring(LogAttributes['tool_input'], 1, 140), LogAttributes['event.name'] = 'hooks.PostToolUse', substring(LogAttributes['tool_input'], 1, 140), LogAttributes['event.name'] = 'hooks.PostToolUseFailure', LogAttributes['error'], LogAttributes['event.name'] = 'hooks.SubagentStart', LogAttributes['agent.id'], LogAttributes['event.name'] = 'hooks.SubagentStop', substring(LogAttributes['agent.last_message'], 1, 140), LogAttributes['event.name'] = 'hooks.TeammateIdle', LogAttributes['teammate.name'], LogAttributes['event.name'] = 'hooks.TaskCreated', LogAttributes['task.subject'], LogAttributes['event.name'] = 'hooks.TaskCompleted', LogAttributes['task.subject'], LogAttributes['event.name'] = 'hooks.InstructionsLoaded', concat(LogAttributes['memory_type'], ': ', LogAttributes['file_path']), LogAttributes['event.name'] = 'hooks.PermissionRequest', concat(LogAttributes['tool_name'], ' — ', substring(LogAttributes['tool_input'], 1, 120)), LogAttributes['event.name'] = 'hooks.PermissionDenied', concat(LogAttributes['tool_name'], ' — ', LogAttributes['reason']), LogAttributes['event.name'] = 'hooks.Notification', concat(LogAttributes['notification_type'], ': ', LogAttributes['message']), LogAttributes['event.name'] = 'hooks.SessionStart', concat(LogAttributes['source'], ' · ', LogAttributes['model']), LogAttributes['event.name'] = 'hooks.SessionEnd', LogAttributes['reason'], LogAttributes['event.name'] = 'hooks.Stop', substring(LogAttributes['last_assistant_message'], 1, 140), LogAttributes['event.name'] = 'hooks.StopFailure', LogAttributes['error'], LogAttributes['event.name'] = 'hooks.ConfigChange', concat(LogAttributes['source'], ': ', LogAttributes['file_path']), LogAttributes['event.name'] = 'hooks.CwdChanged', concat(LogAttributes['old_cwd'], ' → ', LogAttributes['new_cwd']), LogAttributes['event.name'] = 'hooks.FileChanged', concat(LogAttributes['change_type'], ': ', LogAttributes['file_path']), LogAttributes['event.name'] IN ('hooks.WorktreeCreate', 'hooks.WorktreeRemove'), concat(LogAttributes['worktree.branch'], ' @ ', LogAttributes['worktree.path']), LogAttributes['event.name'] IN ('hooks.PreCompact', 'hooks.PostCompact'), concat(LogAttributes['trigger'], ' · ', LogAttributes['tokens_before'], ' → ', LogAttributes['tokens_after']), LogAttributes['event.name'] = 'hooks.Elicitation', concat(LogAttributes['server'], ': ', LogAttributes['message']), LogAttributes['event.name'] = 'hooks.ElicitationResult', concat(LogAttributes['server'], ': ', LogAttributes['response']), '?') AS detail FROM claude_analytics.otel_logs WHERE $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND ($__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session)) ORDER BY time LIMIT 2000",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "time",
+            "desc": false
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "filterable": true,
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 170
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "actor"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "user": {
+                        "color": "blue",
+                        "text": "user"
+                      },
+                      "assistant": {
+                        "color": "purple",
+                        "text": "assistant"
+                      },
+                      "tool": {
+                        "color": "green",
+                        "text": "tool"
+                      },
+                      "agent": {
+                        "color": "orange",
+                        "text": "agent"
+                      },
+                      "system": {
+                        "color": "yellow",
+                        "text": "system"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-text"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "kind"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 28,
+      "title": "Per-User Cost Leaderboard [KAN-36]",
+      "description": "Who's spending what. Joins api_request cost logs with commit and lines-of-code metrics so one row tells the full per-user productivity story.",
+      "type": "table",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 9,
+        "h": 4
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "WITH api AS (SELECT LogAttributes['user.email'] AS user, uniqExact(LogAttributes['session.id']) AS sessions, uniqExactIf(LogAttributes['prompt.id'], LogAttributes['event.name']='user_prompt') AS prompts, countIf(LogAttributes['event.name']='api_request') AS api_calls, sumIf(toFloat64OrZero(LogAttributes['cost_usd']), LogAttributes['event.name']='api_request') AS cost_usd, sumIf(toUInt64OrZero(LogAttributes['input_tokens'])+toUInt64OrZero(LogAttributes['output_tokens']), LogAttributes['event.name']='api_request') AS tokens FROM claude_analytics.otel_logs WHERE LogAttributes['user.email']!='' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) GROUP BY user), commits AS (SELECT Attributes['user.email'] AS user, sum(Value) AS commits FROM claude_analytics.otel_metrics_sum WHERE MetricName='claude_code.commit.count' AND $__timeFilter(TimeUnix) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) GROUP BY user), loc AS (SELECT Attributes['user.email'] AS user, sumIf(Value, Attributes['type']='added') AS lines_added FROM claude_analytics.otel_metrics_sum WHERE MetricName='claude_code.lines_of_code.count' AND $__timeFilter(TimeUnix) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) GROUP BY user) SELECT a.user AS user, a.sessions AS sessions, a.prompts AS prompts, a.api_calls AS api_calls, round(a.cost_usd, 4) AS cost_usd, a.tokens AS tokens, c.commits AS commits, l.lines_added AS lines_added FROM api a LEFT JOIN commits c ON a.user = c.user LEFT JOIN loc l ON a.user = l.user ORDER BY cost_usd DESC",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "cost_usd",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cost_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "gradient-gauge"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tokens"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 29,
+      "title": "Recent Errors (cross-session) [KAN-37]",
+      "description": "Failed tool calls across all sessions, newest first. Filter by tool/user/session to diagnose cross-session incidents. Cross-session by design — ignores the ${session} template variable.",
+      "type": "table",
+      "gridPos": {
+        "x": 12,
+        "y": 142,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT Timestamp AS time, substring(LogAttributes['session.id'], 1, 8) AS session, LogAttributes['user.email'] AS user, LogAttributes['tool_name'] AS tool, substring(LogAttributes['tool_input'], 1, 180) AS detail, toUInt32OrZero(LogAttributes['duration_ms']) AS duration_ms FROM claude_analytics.otel_logs WHERE LogAttributes['event.name']='tool_result' AND LogAttributes['success']='false' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) ORDER BY Timestamp DESC LIMIT 100",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "time",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "filterable": true,
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 170
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "session"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tool"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "duration_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 25,
+      "title": "Feedback Survey Funnel [KAN-32]",
+      "type": "barchart",
+      "gridPos": {
+        "x": 0,
+        "y": 150,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT LogAttributes['survey_type'] AS survey, LogAttributes['event_type'] AS stage, count() AS n FROM claude_analytics.otel_logs WHERE LogAttributes['event.name'] = 'feedback_survey' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY survey, stage ORDER BY survey, stage",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 80
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 30,
+      "title": "Subagent Usage [KAN-45]",
+      "description": "Subagent (Agent tool) dispatch overview. Only the dispatch side is observable — internal tool calls and skill invocations inside the subagent are NOT captured (see KAN-41). 'model' shows 'inherit' when the dispatcher did not pass an explicit model (subagent inherits from parent). 'subagent_type' may be plugin-namespaced (e.g. superpowers:code-reviewer) or bare (e.g. general-purpose, Explore).",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 92,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT JSONExtractString(LogAttributes['tool_input'], 'subagent_type') AS subagent_type, coalesce(nullIf(JSONExtractString(LogAttributes['tool_input'], 'model'), ''), 'inherit') AS model, count() AS calls, countIf(LogAttributes['success'] = 'true') AS successes, countIf(LogAttributes['success'] != 'true') AS failures, round(countIf(LogAttributes['success'] = 'true') / count() * 100, 1) AS success_rate, sum(toUInt64OrZero(LogAttributes['duration_ms'])) AS total_duration_ms, round(avg(toUInt64OrZero(LogAttributes['duration_ms'])), 0) AS avg_duration_ms, max(Timestamp) AS last_used, any(JSONExtractString(LogAttributes['tool_input'], 'description')) AS sample_description FROM claude_analytics.otel_logs WHERE $__timeFilter(Timestamp) AND LogAttributes['tool_name'] = 'Agent' AND LogAttributes['event.name'] = 'tool_result' AND ($__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project)) AND ($__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session)) GROUP BY subagent_type, model ORDER BY calls DESC",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "calls",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "filterable": true,
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "success_rate"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 80
+                    },
+                    {
+                      "color": "green",
+                      "value": 95
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total_duration_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "avg_duration_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last_used"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 170
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sample_description"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 250
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 33,
+      "title": "Blocked Actions by Tool [KAN-58]",
+      "description": "Tool calls where PreToolUse fired but no PostToolUse/PostToolUseFailure arrived. Powered by blocked_tools ReplacingMergeTree — no anti-join needed.",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 118,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT tool_name AS tool, count() AS blocked, substring(any(tool_input), 1, 160) AS sample_input FROM claude_analytics.blocked_tools FINAL WHERE completed = 0 AND $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) GROUP BY tool ORDER BY blocked DESC LIMIT 50",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 34,
+      "title": "Blocked Rate Over Time [KAN-58]",
+      "description": "Blocked-tool count per interval. Powered by blocked_tools MV — no anti-join needed.",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 118,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT $__timeInterval(toDateTime(timestamp)) AS time, count() AS blocked FROM claude_analytics.blocked_tools FINAL WHERE completed = 0 AND $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) GROUP BY time ORDER BY time",
+          "format": 0,
+          "queryType": "timeseries"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 35,
+      "title": "Compaction Events [KAN-59]",
+      "description": "Compaction pre/post pairs with computed duration. Queries compaction_events table (tiny) instead of otel_logs (huge).",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 142,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "WITH pre AS (SELECT session_id AS sid, timestamp AS t_pre, trigger AS trig, custom_instructions AS ci FROM claude_analytics.compaction_events WHERE event_phase = 'pre' AND $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session)), post AS (SELECT session_id AS sid, timestamp AS t_post FROM claude_analytics.compaction_events WHERE event_phase = 'post' AND $__timeFilter(toDateTime(timestamp))) SELECT substring(pre.sid, 1, 8) AS session, t_pre AS time, trig AS trigger, ci AS custom_instructions, dateDiff('millisecond', t_pre, t_post) AS duration_ms FROM pre ASOF LEFT JOIN post ON pre.sid = post.sid AND pre.t_pre <= post.t_post ORDER BY time DESC LIMIT 200",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 36,
+      "title": "Compaction Frequency [KAN-59]",
+      "description": "Compaction count per interval. Queries compaction_events table instead of otel_logs.",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 16,
+        "y": 134,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT $__timeInterval(toDateTime(timestamp)) AS time, count() AS compactions FROM claude_analytics.compaction_events WHERE event_phase = 'pre' AND $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) GROUP BY time ORDER BY time",
+          "format": 0,
+          "queryType": "timeseries"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 37,
+      "title": "Sessions With Config Changes [KAN-60]",
+      "description": "Distinct sessions where CLAUDE.md or .claude/rules/*.md was mutated during the selected time range.",
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 134,
+        "w": 4,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT countDistinct(LogAttributes['session.id']) AS sessions_with_config_change, count() AS total_changes FROM claude_analytics.otel_logs WHERE LogAttributes['event.name'] = 'hooks.ConfigChange' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND ($__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session))",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 38,
+      "title": "Config Changes — Audit Log [KAN-60]",
+      "description": "Runtime policy mutations. OTel cannot see these. In team contexts, correlate with subsequent block-rate drop to flag weakened guardrails.",
+      "type": "table",
+      "gridPos": {
+        "x": 4,
+        "y": 134,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT Timestamp AS time, substring(LogAttributes['session.id'], 1, 8) AS session, LogAttributes['source'] AS triggered_by, LogAttributes['file_path'] AS file, count() OVER (PARTITION BY LogAttributes['session.id']) AS changes_in_session, ResourceAttributes['project.name'] AS project FROM claude_analytics.otel_logs WHERE LogAttributes['event.name'] = 'hooks.ConfigChange' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND ($__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session)) ORDER BY time DESC LIMIT 200",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 39,
+      "title": "Credential Exposures by Category [KAN-63]",
+      "description": "Sensitive files accessed by the Read tool, auto-detected via materialized view pattern matching against 38 credential/secret file patterns.",
+      "type": "barchart",
+      "gridPos": {
+        "x": 0,
+        "y": 126,
+        "w": 10,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT pattern_category AS category, count() AS exposures FROM claude_analytics.credential_exposures WHERE $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) GROUP BY category ORDER BY exposures DESC",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "tooltip": {
+          "mode": "single"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 80
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "yellow",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 40,
+      "title": "Credential Exposure Detail [KAN-63]",
+      "description": "Each sensitive file detected by the Read tool. Metadata only — file contents are never stored.",
+      "type": "table",
+      "gridPos": {
+        "x": 10,
+        "y": 126,
+        "w": 14,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT file_name, matched_label, pattern_category, count() AS times_accessed, uniqExact(session_id) AS sessions, max(timestamp) AS last_seen FROM claude_analytics.credential_exposures WHERE $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) GROUP BY file_name, matched_label, pattern_category ORDER BY times_accessed DESC LIMIT 100",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "times_accessed",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "filterable": true,
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last_seen"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 170
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "pattern_category"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-text"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "env": {
+                        "color": "red",
+                        "text": "env"
+                      },
+                      "cloud": {
+                        "color": "orange",
+                        "text": "cloud"
+                      },
+                      "ssh": {
+                        "color": "red",
+                        "text": "ssh"
+                      },
+                      "certificate": {
+                        "color": "red",
+                        "text": "certificate"
+                      },
+                      "auth": {
+                        "color": "orange",
+                        "text": "auth"
+                      },
+                      "database": {
+                        "color": "yellow",
+                        "text": "database"
+                      },
+                      "package-manager": {
+                        "color": "blue",
+                        "text": "package-manager"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 41,
+      "title": "Most Modified Files [KAN-69]",
+      "description": "Every file Claude mutated (Edit=update, Write=write, Bash rm=delete). No row limit — shows all touched files. Powered by file_mutations_mv materialized views.",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 100,
+        "w": 24,
+        "h": 10
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT file_name, file_extension, directory, count() AS total_mutations, countIf(action = 'update') AS updates, countIf(action = 'write') AS writes, countIf(action = 'delete') AS deletes, countIf(action = 'changed') AS changed, uniqExact(session_id) AS sessions, max(timestamp) AS last_modified FROM claude_analytics.file_mutations WHERE $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) GROUP BY file_name, file_extension, directory ORDER BY total_mutations DESC",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "total_mutations",
+            "desc": true
+          }
+        ],
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "filterable": true,
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last_modified"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 170
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "file_extension"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total_mutations"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "gradient-gauge"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "continuous-blues"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "deletes"
+            },
+            "properties": [
+              {
+                "id": "custom.displayMode",
+                "value": "color-text"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 42,
+      "title": "Total Tokens",
+      "description": "Sum of all tokens: input + output + cache_read + cache_creation from api_request events.",
+      "type": "stat",
+      "gridPos": {
+        "x": 21,
+        "y": 0,
+        "w": 3,
+        "h": 4
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT sum(toUInt64OrZero(LogAttributes['input_tokens']) + toUInt64OrZero(LogAttributes['output_tokens']) + toUInt64OrZero(LogAttributes['cache_read_input_tokens']) + toUInt64OrZero(LogAttributes['cache_creation_input_tokens'])) AS total_tokens FROM claude_analytics.otel_logs WHERE LogAttributes['event.name'] = 'api_request' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session)",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}
