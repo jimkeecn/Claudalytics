@@ -18,7 +18,7 @@ Write this exact content to `.claude/hooks/session-start-health-check.sh`:
 ```bash
 #!/usr/bin/env bash
 # Claude Analytics - SessionStart health check hook
-# VERSION: 1.0.1
+# VERSION: 1.0.0
 
 DOCKER_CONTAINERS=("claude-analytics-clickhouse" "claude-analytics-otel" "claude-analytics-grafana" "claude-analytics-hooks")
 HOOKS_SERVER_URL="http://localhost:4319/health"
@@ -76,12 +76,25 @@ printf '{\n  "hookSpecificOutput": {\n    "hookEventName": "SessionStart",\n    
 exit 0
 ```
 
-## Step 3 — Make executable
+## Step 3 — Verify the written file
+
+Use the Read tool to read `.claude/hooks/session-start-health-check.sh` back, then compare it **line-by-line** against the script content in Step 2. Transcription errors are common in multi-line bash — actively look for:
+
+- Positional parameters: `$1`, `$2`, `$@`, `$#` — easy to drop the digit (`$1` → `$`)
+- Quoted expansions: `"$var"`, `"${var}"`, `"$1"` — easy to mismatch quotes or drop content
+- Escape sequences inside printf / strings: `\\`, `\"`, `\n`, `\r`, `\t`
+- Pipe chains and redirects: `2>/dev/null`, `>&2`, `|`, `&&`, `||`
+- Array syntax: `"${arr[@]}"`, `"${arr[*]}"`
+- The `printf` format string at the end — the sequence of `\n`, `"`, `{`, `}` characters is easy to corrupt
+
+If ANY character differs from the source block, **re-write the file** using the exact Step 2 content, and re-verify. Do NOT proceed to Step 4 until the written file matches byte-for-byte.
+
+## Step 4 — Make executable
 
 ```bash
 chmod +x .claude/hooks/session-start-health-check.sh
 ```
 
-## Step 4 — Return
+## Step 5 — Return
 
-Return `installed (v1.0.1)` to the caller.
+Return `installed (v1.0.0)` to the caller.

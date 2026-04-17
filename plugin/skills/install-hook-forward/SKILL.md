@@ -40,18 +40,30 @@ printf '{"continue": true}\n'
 exit 0
 ```
 
-## Step 3 — Make executable
+## Step 3 — Verify the written file
+
+Use the Read tool to read `.claude/hooks/forward-hook.sh` back, then compare it **line-by-line** against the script content in Step 2. Transcription errors are common in multi-line bash — actively look for:
+
+- Positional parameters: `$1`, `$2`, `$@`, `$#` — easy to drop the digit (`$1` → `$`)
+- Quoted expansions: `"$var"`, `"${var}"`, `"${1:-unknown}"` — easy to mismatch quotes or drop content
+- Escape sequences and redirects: `2>/dev/null`, `>&1`, `>/dev/null`, `|`, `&&`, `||`
+- The background subshell `( ... & ) >/dev/null 2>&1` — the grouping parentheses and the trailing `&` are easy to drop
+- `printf '{"continue": true}\n'` — the JSON braces and `\n` are easy to corrupt
+
+If ANY character differs from the source block, **re-write the file** using the exact Step 2 content, and re-verify. Do NOT proceed to Step 4 until the written file matches byte-for-byte.
+
+## Step 4 — Make executable
 
 ```bash
 chmod +x .claude/hooks/forward-hook.sh
 ```
 
-## Step 4 — Clean up old script
+## Step 5 — Clean up old script
 
 ```bash
 rm -f .claude/hooks/session-start-forward.sh
 ```
 
-## Step 5 — Return
+## Step 6 — Return
 
 Return `installed (v1.0.0)` to the caller.
