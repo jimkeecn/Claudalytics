@@ -2,7 +2,7 @@
 
 [English](../README.md) | [中文](README.zh-CN.md) | [日本語](README.ja.md) | [Français](README.fr.md) | Deutsch
 
-# Analytic Claude
+# Claudalytics
 
 **Lokales Analytics-Dashboard fuer Claude Code**
 
@@ -27,8 +27,8 @@ Keine Cloud-Abhaengigkeiten. Deine Daten bleiben auf deinem Rechner.
 ### 1. Analytics-Stack starten
 
 ```bash
-git clone https://github.com/jimkeecn/Analytic_Claude.git
-cd Analytic_Claude/docker-stack
+git clone https://github.com/jimkeecn/Claudalytics.git
+cd Claudalytics/docker-stack
 docker compose up -d --build
 ```
 
@@ -46,7 +46,7 @@ Fuehre `/validate-infra` aus, um zu pruefen, ob alle 4 Container, Tabellen und M
 Oeffne ein beliebiges Projekt in Claude Code und installiere das Plugin:
 
 ```
-/install-plugin /full/path/to/Analytic_Claude/plugin
+/install-plugin /full/path/to/Claudalytics/plugin
 ```
 
 ### 3. Initialisieren
@@ -114,32 +114,32 @@ Identifiziere Performance-Engpaesse — welche Tools bei p50/p95 am langsamsten 
 
 ### 37 Dashboard-Panels
 
-| Kategorie | Panels |
-|-----------|--------|
-| KPIs | Sessions, Ereignisse, Kosten/1K Tokens, Gesamt-Tokens, Kosten pro Benutzer |
-| Kosten | Kosten im Zeitverlauf, teuerste Sessions/Prompts, Kosten pro aktiver Minute, Commits vs. Kosten |
-| Tools | Tool-Nutzung, Modell-Nutzung, Akzeptieren/Ablehnen-Quoten, Cache-Trefferquote |
-| Latenz | API-Latenz-Perzentile, Tool-Ausfuehrungslatenz, langsamste WebFetch-URLs |
-| Zeitleiste | Vollstaendiger Session-Ereignisverlauf (Limit: 2000 Zeilen) |
-| Workflow | Verwendete Skills, besuchte Websites, MCP-Server-Aufrufe, Subagent-Nutzung |
-| Dateien | Am haeufigsten geaenderte Dateien mit Aktionsaufschluesselung |
-| Code | Codezeilen pro Benutzer, Prompt-Laengenverteilung |
-| Sicherheit | Blockierte Aktionen, Blockierungsrate im Zeitverlauf, Zugangsdaten-Expositionen |
-| Betrieb | Konfigurationsaenderungen, Compaction-Ereignisse/-Haeufigkeit, aktuelle Fehler |
-| Feedback | Umfrage-Trichter |
+| Kategorie  | Panels                                                                                          |
+| ---------- | ----------------------------------------------------------------------------------------------- |
+| KPIs       | Sessions, Ereignisse, Kosten/1K Tokens, Gesamt-Tokens, Kosten pro Benutzer                      |
+| Kosten     | Kosten im Zeitverlauf, teuerste Sessions/Prompts, Kosten pro aktiver Minute, Commits vs. Kosten |
+| Tools      | Tool-Nutzung, Modell-Nutzung, Akzeptieren/Ablehnen-Quoten, Cache-Trefferquote                   |
+| Latenz     | API-Latenz-Perzentile, Tool-Ausfuehrungslatenz, langsamste WebFetch-URLs                        |
+| Zeitleiste | Vollstaendiger Session-Ereignisverlauf (Limit: 2000 Zeilen)                                     |
+| Workflow   | Verwendete Skills, besuchte Websites, MCP-Server-Aufrufe, Subagent-Nutzung                      |
+| Dateien    | Am haeufigsten geaenderte Dateien mit Aktionsaufschluesselung                                   |
+| Code       | Codezeilen pro Benutzer, Prompt-Laengenverteilung                                               |
+| Sicherheit | Blockierte Aktionen, Blockierungsrate im Zeitverlauf, Zugangsdaten-Expositionen                 |
+| Betrieb    | Konfigurationsaenderungen, Compaction-Ereignisse/-Haeufigkeit, aktuelle Fehler                  |
+| Feedback   | Umfrage-Trichter                                                                                |
 
 ---
 
 ## Aktualisierung
 
 ```bash
-cd Analytic_Claude
+cd Claudalytics
 git pull
 cd docker-stack
 docker compose up -d --build
 ```
 
-Additive Schema-Aenderungen (neue Tabellen, neue Materialized Views) werden beim Start des hooks-server automatisch angewendet. Wenn ein Release destruktive Schema-Aenderungen enthaelt (Spaltentyp-Aenderungen, Neu-Partitionierung), fuehre `/migrate-db` im Analytic_Claude-Projekt aus — es fuehrt dich durch eine sichere Side-by-Side-Migration mit Backup-Aufforderungen.
+Additive Schema-Aenderungen (neue Tabellen, neue Materialized Views) werden beim Start des hooks-server automatisch angewendet. Wenn ein Release destruktive Schema-Aenderungen enthaelt (Spaltentyp-Aenderungen, Neu-Partitionierung), fuehre `/migrate-db` im Claudalytics-Projekt aus — es fuehrt dich durch eine sichere Side-by-Side-Migration mit Backup-Aufforderungen.
 
 Fuehre anschliessend `/init-claude-analytics` in jedem Projekt erneut aus, um Hook-Skripte und Konfiguration zu aktualisieren, falls eine neue Version verfuegbar ist. Der Skill aktualisiert nur veraltete Teile — bereits aktuelle werden nicht veraendert.
 

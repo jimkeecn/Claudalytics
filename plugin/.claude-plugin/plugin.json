@@ -3,9 +3,9 @@
   "description": "OTel + Hooks analytics for Claude Code. Run /init-claude-analytics to configure telemetry and hooks capture for this project.",
   "version": "1.0.0",
   "author": {
-    "name": "Analytic Claude"
+    "name": "Claudalytics"
   },
-  "homepage": "https://github.com/jimkeecn/Analytic_Claude",
-  "repository": "https://github.com/jimkeecn/Analytic_Claude",
+  "homepage": "https://github.com/jimkeecn/Claudalytics",
+  "repository": "https://github.com/jimkeecn/Claudalytics",
   "license": "MIT"
 }

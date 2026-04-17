@@ -57,12 +57,12 @@ else
   context="[claude-analytics] WARNING: Monitoring services are NOT fully operational."
   sysmsg="[claude-analytics] WARNING: Monitoring services are NOT fully operational."
   if [ "$docker_healthy" = false ]; then
-    detail=" Containers down: ${down_containers[*]}. Run: docker compose up -d from Analytic_Claude/docker-stack."
+    detail=" Containers down: ${down_containers[*]}. Run: docker compose up -d from Claudalytics/docker-stack."
     context="$context$detail"
     sysmsg="$sysmsg$detail"
   fi
   if [ "$hooks_healthy" = false ]; then
-    detail=" Hooks server not responding on port 4319. Run: docker compose up -d from Analytic_Claude/docker-stack."
+    detail=" Hooks server not responding on port 4319. Run: docker compose up -d from Claudalytics/docker-stack."
     context="$context$detail"
     sysmsg="$sysmsg$detail"
   fi

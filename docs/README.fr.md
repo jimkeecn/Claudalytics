@@ -2,7 +2,7 @@
 
 [English](../README.md) | [中文](README.zh-CN.md) | [日本語](README.ja.md) | Français | [Deutsch](README.de.md)
 
-# Analytic Claude
+# Claudalytics
 
 **Tableau de bord analytique local pour Claude Code**
 
@@ -27,8 +27,8 @@ Aucune dépendance cloud. Vos données restent sur votre machine.
 ### 1. Démarrer la stack analytique
 
 ```bash
-git clone https://github.com/jimkeecn/Analytic_Claude.git
-cd Analytic_Claude/docker-stack
+git clone https://github.com/jimkeecn/Claudalytics.git
+cd Claudalytics/docker-stack
 docker compose up -d --build
 ```
 
@@ -46,7 +46,7 @@ Exécutez `/validate-infra` pour vérifier que les 4 conteneurs, les tables et l
 Ouvrez n'importe quel projet dans Claude Code et installez le plugin :
 
 ```
-/install-plugin /full/path/to/Analytic_Claude/plugin
+/install-plugin /full/path/to/Claudalytics/plugin
 ```
 
 ### 3. Initialiser
@@ -114,32 +114,32 @@ Identifiez les goulots d'étranglement de performance — quels outils sont les 
 
 ### 37 panneaux de tableau de bord
 
-| Catégorie | Panneaux |
-|-----------|----------|
-| KPIs | Sessions, événements, coût/1K tokens, total tokens, coût par utilisateur |
-| Coûts | Coût dans le temps, sessions/prompts les plus coûteux, coût par minute active, commits vs coût |
-| Outils | Utilisation des outils, utilisation des modèles, taux d'acceptation/rejet, taux de cache hit |
-| Latence | Percentiles de latence API, latence d'exécution des outils, URLs WebFetch les plus lentes |
-| Chronologie | Historique complet des événements de session (limite de 2000 lignes) |
-| Workflow | Skills utilisés, sites web visités, appels serveur MCP, utilisation des subagents |
-| Fichiers | Fichiers les plus modifiés avec répartition par action |
-| Code | Lignes de code par utilisateur, distribution de la longueur des prompts |
-| Sécurité | Actions bloquées, taux de blocage dans le temps, expositions de credentials |
-| Ops | Changements de configuration, événements/fréquence de compaction, erreurs récentes |
-| Feedback | Entonnoir de sondage |
+| Catégorie   | Panneaux                                                                                       |
+| ----------- | ---------------------------------------------------------------------------------------------- |
+| KPIs        | Sessions, événements, coût/1K tokens, total tokens, coût par utilisateur                       |
+| Coûts       | Coût dans le temps, sessions/prompts les plus coûteux, coût par minute active, commits vs coût |
+| Outils      | Utilisation des outils, utilisation des modèles, taux d'acceptation/rejet, taux de cache hit   |
+| Latence     | Percentiles de latence API, latence d'exécution des outils, URLs WebFetch les plus lentes      |
+| Chronologie | Historique complet des événements de session (limite de 2000 lignes)                           |
+| Workflow    | Skills utilisés, sites web visités, appels serveur MCP, utilisation des subagents              |
+| Fichiers    | Fichiers les plus modifiés avec répartition par action                                         |
+| Code        | Lignes de code par utilisateur, distribution de la longueur des prompts                        |
+| Sécurité    | Actions bloquées, taux de blocage dans le temps, expositions de credentials                    |
+| Ops         | Changements de configuration, événements/fréquence de compaction, erreurs récentes             |
+| Feedback    | Entonnoir de sondage                                                                           |
 
 ---
 
 ## Mise à jour
 
 ```bash
-cd Analytic_Claude
+cd Claudalytics
 git pull
 cd docker-stack
 docker compose up -d --build
 ```
 
-Les changements de schéma additifs (nouvelles tables, nouvelles vues matérialisées) sont appliqués automatiquement par le hooks-server au démarrage. Si une version inclut des changements de schéma destructifs (modification de types de colonnes, re-partitionnement), exécutez `/migrate-db` depuis le projet Analytic_Claude — il vous guidera à travers une migration sécurisée côte à côte avec des invites de sauvegarde.
+Les changements de schéma additifs (nouvelles tables, nouvelles vues matérialisées) sont appliqués automatiquement par le hooks-server au démarrage. Si une version inclut des changements de schéma destructifs (modification de types de colonnes, re-partitionnement), exécutez `/migrate-db` depuis le projet Claudalytics — il vous guidera à travers une migration sécurisée côte à côte avec des invites de sauvegarde.
 
 Ensuite, relancez `/init-claude-analytics` dans chaque projet pour mettre à jour les scripts et la configuration des hooks si une nouvelle version est disponible. Le skill ne met à jour que ce qui est en retard — il ne touche pas à ce qui est déjà à jour.
 

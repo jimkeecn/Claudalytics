@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](docs/README.zh-CN.md) | [日本語](docs/README.ja.md) | [Français](docs/README.fr.md) | [Deutsch](docs/README.de.md)
 
-# Analytic Claude
+# Claudalytics
 
 **Local analytics dashboard for Claude Code**
 
@@ -133,13 +133,13 @@ Identify performance bottlenecks — which tools are slowest at p50/p95, and whi
 ## Updating
 
 ```bash
-cd Analytic_Claude
+cd Claudalytics
 git pull
 cd docker-stack
 docker compose up -d --build
 ```
 
-Additive schema changes (new tables, new materialized views) are applied automatically by the hooks-server on startup. If a release includes destructive schema changes (column type changes, re-partitioning), run `/migrate-db` from the Analytic_Claude project — it will walk you through a safe, side-by-side migration with backup prompts.
+Additive schema changes (new tables, new materialized views) are applied automatically by the hooks-server on startup. If a release includes destructive schema changes (column type changes, re-partitioning), run `/migrate-db` from the Claudalytics project — it will walk you through a safe, side-by-side migration with backup prompts.
 
 Then re-run `/init-claude-analytics` in each project to update hook scripts and configuration if a new version is available. The skill only updates what's behind — it won't touch what's already current.
 
