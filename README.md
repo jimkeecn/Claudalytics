@@ -27,8 +27,8 @@ Zero cloud dependencies. Your data stays on your machine.
 ### 1. Start the analytics stack
 
 ```bash
-git clone https://github.com/jimkeecn/Analytic_Claude.git
-cd Analytic_Claude/docker-stack
+git clone https://github.com/jimkeecn/Claudalytics.git
+cd Claudalytics/docker-stack
 docker compose up -d --build
 ```
 
@@ -46,7 +46,7 @@ Run `/validate-infra` to verify all 4 containers, tables, and materialized views
 Open any project in Claude Code and install the plugin:
 
 ```
-/install-plugin /full/path/to/Analytic_Claude/plugin
+/install-plugin /full/path/to/Claudalytics/plugin
 ```
 
 ### 3. Initialize
