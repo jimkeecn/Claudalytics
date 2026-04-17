@@ -1,0 +1,14 @@
+{
+  "name": "claudalytics",
+  "owner": {
+    "name": "Claudalytics"
+  },
+  "plugins": [
+    {
+      "name": "claudalytics",
+      "description": "OTel + Hooks analytics for Claude Code. Captures telemetry and hook events into ClickHouse, visualizes via Grafana dashboards.",
+      "version": "1.0.0",
+      "source": "./"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "claudalytics",
+  "description": "OTel + Hooks analytics for Claude Code. Run /init-claudalytics to configure telemetry and hooks capture for this project.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Claudalytics"
+  },
+  "homepage": "https://github.com/jimkeecn/Claudalytics",
+  "repository": "https://github.com/jimkeecn/Claudalytics",
+  "license": "MIT"
+}

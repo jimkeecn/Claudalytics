@@ -1,0 +1,81 @@
+name: claudalytics
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: claudalytics-clickhouse
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - claudalytics-clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse/allow-network.xml:/etc/clickhouse-server/users.d/allow-network.xml:ro
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+    environment:
+      CLICKHOUSE_DB: claudalytics
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.148.0
+    container_name: claudalytics-otel
+    ports:
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:13133:13133"
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
+  hooks-server:
+    build:
+      context: ./hooks-server
+    image: claudalytics-hooks:latest
+    container_name: claudalytics-hooks
+    ports:
+      - "127.0.0.1:4319:4319"
+    environment:
+      OTEL_ENDPOINT: "http://otel-collector:4318/v1/logs"
+      CLICKHOUSE_URL: "http://clickhouse:8123"
+      LOG_LEVEL: "info"
+    volumes:
+      - claudalytics-hooks-logs:/app/logs
+      - ./clickhouse/init:/app/sql:ro
+    depends_on:
+      otel-collector:
+        condition: service_started
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: claudalytics-grafana
+    ports:
+      - "127.0.0.1:13000:3000"
+    volumes:
+      - claudalytics-grafana-data:/var/lib/grafana
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    environment:
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  claudalytics-clickhouse-data:
+    name: claudalytics-clickhouse-data
+  claudalytics-grafana-data:
+    name: claudalytics-grafana-data
+  claudalytics-hooks-logs:
+    name: claudalytics-hooks-logs

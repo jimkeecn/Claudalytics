@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Read(*)",
+      "Glob(*)",
+      "Grep(*)",
+
+      "Bash(docker ps:*)",
+      "Bash(docker logs claudalytics-clickhouse:*)",
+      "Bash(docker logs claudalytics-otel:*)",
+      "Bash(docker logs claudalytics-hooks:*)",
+      "Bash(docker logs claudalytics-grafana:*)",
+
+      "Bash(uname:*)",
+      "Bash(lsof -nP -iTCP:*)",
+      "Bash(lsof -i:*)",
+      "Bash(ss -lntp:*)",
+      "Bash(netstat -ano)",
+      "Bash(netstat -an)",
+      "Bash(netstat:*)",
+
+      "Bash(curl -s http://localhost:*)",
+      "Bash(curl -sf http://localhost:*)",
+      "Bash(curl -sS http://localhost:*)",
+      "Bash(curl -sf -o /dev/null http://localhost:*)",
+      "Bash(curl -sf -o /dev/null -w:*)",
+      "Bash(curl -s \"http://localhost:*)",
+      "Bash(curl -sf \"http://localhost:*)",
+
+      "Bash(node -e:*)",
+      "Bash(git remote get-url:*)",
+      "Bash(basename:*)",
+      "Bash(pwd)",
+
+      "Bash(mkdir -p .claude/hooks)",
+      "Bash(chmod +x .claude/hooks/session-start-health-check.sh)",
+      "Bash(chmod +x .claude/hooks/forward-hook.sh)",
+      "Bash(rm -f .claude/hooks/session-start-forward.sh)",
+
+      "Write(.claude/hooks/session-start-health-check.sh)",
+      "Write(.claude/hooks/forward-hook.sh)",
+      "Write(.claude/analytics.json)",
+      "Edit(.claude/settings.local.json)",
+      "Edit(.claude/analytics.json)",
+      "Edit(.gitignore)",
+
+      "Skill(install-hook-health-check)",
+      "Skill(install-hook-forward)",
+      "Skill(preflight-check)",
+      "Skill(validate-infra)",
+      "Skill(migrate-db)",
+      "Skill(init-claudalytics)"
+    ]
+  }
+}
