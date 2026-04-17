@@ -10,7 +10,7 @@ services:
     volumes:
       - claudalytics-clickhouse-data:/var/lib/clickhouse
       - ./clickhouse/allow-network.xml:/etc/clickhouse-server/users.d/allow-network.xml:ro
-      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+      - ./clickhouse/init/001_init_schema.sql:/docker-entrypoint-initdb.d/001_init_schema.sql:ro
     environment:
       CLICKHOUSE_DB: claudalytics
     healthcheck:
