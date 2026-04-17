@@ -24,24 +24,50 @@ Aucune dépendance cloud. Vos données restent sur votre machine.
 
 ## Installation
 
-### 1. Démarrer la stack analytique
+### 1. Cloner et exécuter la vérification préalable des ports
 
 ```bash
 git clone https://github.com/jimkeecn/Claudalytics.git
-cd Claudalytics/docker-stack
+cd Claudalytics
+claude
+```
+
+Dans Claude Code, exécutez :
+
+```
+/preflight-check
+```
+
+Cela vérifie que tous les ports hôte requis sont libres **avant** de démarrer Docker. Le serveur de hooks et l'exportateur OTel sont étroitement couplés à ces numéros de port — si un port est occupé, libérez-le (le skill affiche le processus et la commande pour le terminer). Ne remappez **pas** les ports de Claudalytics.
+
+**Ports hôte requis**
+
+| Port  | Usage                            |
+| ----- | -------------------------------- |
+| 13000 | Interface Grafana                |
+| 4317  | Collecteur OTel (récepteur gRPC) |
+| 4318  | Collecteur OTel (récepteur HTTP) |
+| 4319  | Serveur de hooks                 |
+| 8123  | ClickHouse HTTP                  |
+| 9000  | ClickHouse natif (TCP)           |
+| 13133 | Endpoint de santé du collecteur  |
+
+### 2. Démarrer la stack analytique
+
+```bash
+cd docker-stack
 docker compose up -d --build
 ```
 
-Attendez environ 30 secondes. Revenez ensuite à la racine du dépôt et ouvrez Claude Code :
+Attendez environ 30 secondes. Revenez ensuite à la racine du dépôt :
 
 ```bash
 cd ..
-claude
 ```
 
 Exécutez `/validate-infra` pour vérifier que les 4 conteneurs, les tables et les vues matérialisées sont en bon état.
 
-### 2. Installer le plugin dans votre projet
+### 3. Installer le plugin dans votre projet
 
 Ouvrez n'importe quel projet dans Claude Code et installez le plugin :
 
@@ -49,7 +75,7 @@ Ouvrez n'importe quel projet dans Claude Code et installez le plugin :
 /install-plugin /full/path/to/Claudalytics/plugin
 ```
 
-### 3. Initialiser
+### 4. Initialiser
 
 ```
 /init-claude-analytics
@@ -57,7 +83,7 @@ Ouvrez n'importe quel projet dans Claude Code et installez le plugin :
 
 Suivez les instructions — confirmez le nom de votre projet, et le skill configure tout automatiquement.
 
-### 4. Redémarrer Claude Code et ouvrir les tableaux de bord
+### 5. Redémarrer Claude Code et ouvrir les tableaux de bord
 
 Redémarrez votre session pour que la télémétrie prenne effet, puis ouvrez :
 

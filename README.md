@@ -24,24 +24,50 @@ Zero cloud dependencies. Your data stays on your machine.
 
 ## Installation
 
-### 1. Start the analytics stack
+### 1. Clone and run the port preflight check
 
 ```bash
 git clone https://github.com/jimkeecn/Claudalytics.git
-cd Claudalytics/docker-stack
+cd Claudalytics
+claude
+```
+
+In Claude Code, run:
+
+```
+/preflight-check
+```
+
+This verifies that all required host ports are free **before** you start Docker. The hooks server and OTel exporter are tightly coupled to these port numbers — if any port is in use, free it (the skill prints the process and the terminate command). Do **not** remap Claudalytics' ports.
+
+**Required host ports**
+
+| Port  | Purpose                        |
+| ----- | ------------------------------ |
+| 13000 | Grafana UI                     |
+| 4317  | OTel collector (gRPC receiver) |
+| 4318  | OTel collector (HTTP receiver) |
+| 4319  | Hooks server                   |
+| 8123  | ClickHouse HTTP                |
+| 9000  | ClickHouse native TCP          |
+| 13133 | OTel collector health endpoint |
+
+### 2. Start the analytics stack
+
+```bash
+cd docker-stack
 docker compose up -d --build
 ```
 
-Wait ~30 seconds. Then go back to the repo root and open Claude Code:
+Wait ~30 seconds. Then go back to the repo root:
 
 ```bash
 cd ..
-claude
 ```
 
 Run `/validate-infra` to verify all 4 containers, tables, and materialized views are healthy.
 
-### 2. Install the plugin in your project
+### 3. Install the plugin in your project
 
 Open any project in Claude Code and install the plugin:
 
@@ -49,7 +75,7 @@ Open any project in Claude Code and install the plugin:
 /install-plugin /full/path/to/Claudalytics/plugin
 ```
 
-### 3. Initialize
+### 4. Initialize
 
 ```
 /init-claude-analytics
@@ -57,7 +83,7 @@ Open any project in Claude Code and install the plugin:
 
 Follow the prompts — confirm your project name, and the skill configures everything.
 
-### 4. Restart Claude Code and open dashboards
+### 5. Restart Claude Code and open dashboards
 
 Restart your session for telemetry to take effect, then open:
 

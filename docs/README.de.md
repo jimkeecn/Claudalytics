@@ -24,24 +24,50 @@ Keine Cloud-Abhaengigkeiten. Deine Daten bleiben auf deinem Rechner.
 
 ## Installation
 
-### 1. Analytics-Stack starten
+### 1. Klonen und Port-Vorabpruefung ausfuehren
 
 ```bash
 git clone https://github.com/jimkeecn/Claudalytics.git
-cd Claudalytics/docker-stack
+cd Claudalytics
+claude
+```
+
+Fuehre in Claude Code aus:
+
+```
+/preflight-check
+```
+
+Dies prueft, dass alle erforderlichen Host-Ports frei sind, **bevor** du Docker startest. Der Hooks-Server und der OTel-Exporter sind eng mit diesen Portnummern verknuepft — wenn ein Port belegt ist, gib ihn frei (der Skill zeigt den Prozess und den Befehl zum Beenden an). Mappe Claudalytics' Ports **nicht** um.
+
+**Erforderliche Host-Ports**
+
+| Port  | Zweck                          |
+| ----- | ------------------------------ |
+| 13000 | Grafana-Oberflaeche            |
+| 4317  | OTel-Collector (gRPC-Receiver) |
+| 4318  | OTel-Collector (HTTP-Receiver) |
+| 4319  | Hooks-Server                   |
+| 8123  | ClickHouse HTTP                |
+| 9000  | ClickHouse Native TCP          |
+| 13133 | OTel-Collector Health-Endpoint |
+
+### 2. Analytics-Stack starten
+
+```bash
+cd docker-stack
 docker compose up -d --build
 ```
 
-Warte ca. 30 Sekunden. Gehe dann zurueck ins Repository-Stammverzeichnis und oeffne Claude Code:
+Warte ca. 30 Sekunden. Gehe dann zurueck ins Repository-Stammverzeichnis:
 
 ```bash
 cd ..
-claude
 ```
 
 Fuehre `/validate-infra` aus, um zu pruefen, ob alle 4 Container, Tabellen und Materialized Views ordnungsgemaess funktionieren.
 
-### 2. Plugin in deinem Projekt installieren
+### 3. Plugin in deinem Projekt installieren
 
 Oeffne ein beliebiges Projekt in Claude Code und installiere das Plugin:
 
@@ -49,7 +75,7 @@ Oeffne ein beliebiges Projekt in Claude Code und installiere das Plugin:
 /install-plugin /full/path/to/Claudalytics/plugin
 ```
 
-### 3. Initialisieren
+### 4. Initialisieren
 
 ```
 /init-claude-analytics
@@ -57,7 +83,7 @@ Oeffne ein beliebiges Projekt in Claude Code und installiere das Plugin:
 
 Folge den Eingabeaufforderungen — bestatige deinen Projektnamen, und der Skill konfiguriert alles automatisch.
 
-### 4. Claude Code neu starten und Dashboards oeffnen
+### 5. Claude Code neu starten und Dashboards oeffnen
 
 Starte deine Session neu, damit die Telemetrie wirksam wird, und oeffne dann:
 

@@ -4,6 +4,8 @@ Local telemetry collection stack for Claude Code sessions.
 
 ## Quick Start
 
+**Before `docker compose up`, run `/preflight-check` from the repo root in Claude Code** to verify all required host ports are free. The hooks server and OTel exporter are tightly coupled to these port numbers — if a port is in use, free it; do **not** remap Claudalytics' ports.
+
 ```bash
 cd docker-stack
 docker compose up -d
@@ -47,7 +49,6 @@ docker compose down -v    # Remove containers AND all data
 
 ## Port Conflicts
 
-If a port is already in use, either stop the conflicting service or
-create a `docker-compose.override.yaml` to remap ports.
+Run `/preflight-check` from the repo root in Claude Code before `docker compose up`. It detects host port conflicts and tells you which process to stop. Do **not** remap Claudalytics' own ports — the hooks server and OTel exporter are configured for these exact port numbers, and changing them cascades into per-project configuration.
 
-Required ports: 13000, 4317, 4318, 8123, 9000, 13133
+Required ports: 13000, 4317, 4318, 4319, 8123, 9000, 13133

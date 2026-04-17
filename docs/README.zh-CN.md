@@ -24,24 +24,50 @@
 
 ## 安装
 
-### 1. 启动分析服务栈
+### 1. 克隆并运行端口预检查
 
 ```bash
 git clone https://github.com/jimkeecn/Claudalytics.git
-cd Claudalytics/docker-stack
+cd Claudalytics
+claude
+```
+
+在 Claude Code 中，运行：
+
+```
+/preflight-check
+```
+
+这会在启动 Docker **之前**验证所有所需的主机端口是否空闲。hooks 服务器和 OTel 导出器与这些端口号紧密耦合 — 如果某个端口被占用，请释放它（技能会显示进程和终止命令）。请勿重新映射 Claudalytics 的端口。
+
+**所需主机端口**
+
+| 端口  | 用途                       |
+| ----- | -------------------------- |
+| 13000 | Grafana 仪表板             |
+| 4317  | OTel 收集器（gRPC 接收器） |
+| 4318  | OTel 收集器（HTTP 接收器） |
+| 4319  | Hooks 服务器               |
+| 8123  | ClickHouse HTTP            |
+| 9000  | ClickHouse 原生 TCP        |
+| 13133 | OTel 收集器健康检查端点    |
+
+### 2. 启动分析服务栈
+
+```bash
+cd docker-stack
 docker compose up -d --build
 ```
 
-等待约 30 秒。然后返回仓库根目录并打开 Claude Code：
+等待约 30 秒。然后返回仓库根目录：
 
 ```bash
 cd ..
-claude
 ```
 
 运行 `/validate-infra` 以验证所有 4 个容器、数据表和物化视图是否正常运行。
 
-### 2. 在项目中安装插件
+### 3. 在项目中安装插件
 
 在 Claude Code 中打开任意项目并安装插件：
 
@@ -49,7 +75,7 @@ claude
 /install-plugin /full/path/to/Claudalytics/plugin
 ```
 
-### 3. 初始化
+### 4. 初始化
 
 ```
 /init-claude-analytics
@@ -57,7 +83,7 @@ claude
 
 按照提示操作 — 确认项目名称，技能会自动完成所有配置。
 
-### 4. 重启 Claude Code 并打开仪表板
+### 5. 重启 Claude Code 并打开仪表板
 
 重启会话以使遥测生效，然后打开：
 
