@@ -18,7 +18,7 @@ Write this exact content to `.claude/hooks/session-start-health-check.sh`:
 ```bash
 #!/usr/bin/env bash
 # Claude Analytics - SessionStart health check hook
-# VERSION: 1.0.0
+# VERSION: 1.0.1
 
 DOCKER_CONTAINERS=("claude-analytics-clickhouse" "claude-analytics-otel" "claude-analytics-grafana" "claude-analytics-hooks")
 HOOKS_SERVER_URL="http://localhost:4319/health"
@@ -51,8 +51,8 @@ escape_for_json() {
 }
 
 if [ "$docker_healthy" = true ] && [ "$hooks_healthy" = true ]; then
-  context="[claude-analytics] All services healthy. Docker stack and hooks server running. Dashboards: http://localhost:3000"
-  sysmsg="[claude-analytics] Services healthy. Dashboards: http://localhost:3000"
+  context="[claude-analytics] All services healthy. Docker stack and hooks server running. Dashboards: http://localhost:13000"
+  sysmsg="[claude-analytics] Services healthy. Dashboards: http://localhost:13000"
 else
   context="[claude-analytics] WARNING: Monitoring services are NOT fully operational."
   sysmsg="[claude-analytics] WARNING: Monitoring services are NOT fully operational."
@@ -84,4 +84,4 @@ chmod +x .claude/hooks/session-start-health-check.sh
 
 ## Step 4 — Return
 
-Return `installed (v1.0.0)` to the caller.
+Return `installed (v1.0.1)` to the caller.

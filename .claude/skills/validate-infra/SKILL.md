@@ -16,7 +16,7 @@ Read-only health check for the Claude Analytics Docker stack. Validates that all
 1. Docker containers: clickhouse, otel-collector, grafana, hooks-server
 2. ClickHouse tables: schema_version, sessions, credential_exposures, file_mutations, blocked_tools, compaction_events, websites_visited, otel_logs
 3. Materialized views (14): sessions_mv, credential_exposures_mv, file_mutations_edit_mv, file_mutations_write_mv, file_mutations_delete_mv, file_mutations_changed_mv, blocked_tools_pre_mv, blocked_tools_post_mv, compaction_events_pre_mv, compaction_events_post_mv, websites_visited_fetch_mv, websites_visited_search_mv, websites_visited_bash_mv
-4. Service endpoints: OTel Collector (13133), hooks-server (4319), Grafana (3000)
+4. Service endpoints: OTel Collector (13133), hooks-server (4319), Grafana (13000)
 
 ## Step 1 — Check Docker containers
 
@@ -27,6 +27,7 @@ docker ps --format "{{.Names}}\t{{.Status}}" --filter "name=claude-analytics" 2>
 ```
 
 Check that all 4 containers appear:
+
 - `claude-analytics-clickhouse` — should show `(healthy)`
 - `claude-analytics-otel`
 - `claude-analytics-grafana`
@@ -73,7 +74,7 @@ Note: If `otel_logs` doesn't exist yet, all MVs will be missing — this is expe
 ```bash
 curl -sf -o /dev/null -w "%{http_code}" http://localhost:13133/ 2>/dev/null
 curl -sf http://localhost:4319/health 2>/dev/null
-curl -sf -o /dev/null -w "%{http_code}" http://localhost:3000/api/health 2>/dev/null
+curl -sf -o /dev/null -w "%{http_code}" http://localhost:13000/api/health 2>/dev/null
 ```
 
 For hooks-server, parse the JSON response to extract `version`, `schema_version`, and `bootstrap` status.
@@ -125,7 +126,7 @@ Claude Analytics — Infrastructure Validation
   ─────────────────
     OTel Collector  http://localhost:13133   [200 / unreachable]
     Hooks Server    http://localhost:4319    [ok v1.1.0 schema:v1 bootstrap:complete / ...]
-    Grafana         http://localhost:3000    [200 / unreachable]
+    Grafana         http://localhost:13000   [200 / unreachable]
 
   Result: [All checks passed / N issues found]
 ```

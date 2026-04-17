@@ -11,17 +11,18 @@ docker compose up -d
 
 ## Services
 
-| Service | URL | Credentials |
-|---------|-----|-------------|
-| Grafana | http://localhost:3000 | admin / admin |
-| OTel Collector (gRPC) | localhost:4317 | - |
-| OTel Collector (HTTP) | localhost:4318 | - |
-| ClickHouse (HTTP) | http://localhost:8123 | default / (no password) |
-| ClickHouse (native) | localhost:9000 | default / (no password) |
+| Service               | URL                    | Credentials             |
+| --------------------- | ---------------------- | ----------------------- |
+| Grafana               | http://localhost:13000 | admin / admin           |
+| OTel Collector (gRPC) | localhost:4317         | -                       |
+| OTel Collector (HTTP) | localhost:4318         | -                       |
+| ClickHouse (HTTP)     | http://localhost:8123  | default / (no password) |
+| ClickHouse (native)   | localhost:9000         | default / (no password) |
 
 ## First Run
 
 On first `docker compose up`, ClickHouse automatically:
+
 - Creates the `claude_analytics` database
 - Creates the `sessions` table
 
@@ -49,4 +50,4 @@ docker compose down -v    # Remove containers AND all data
 If a port is already in use, either stop the conflicting service or
 create a `docker-compose.override.yaml` to remap ports.
 
-Required ports: 3000, 4317, 4318, 8123, 9000, 13133
+Required ports: 13000, 4317, 4318, 8123, 9000, 13133

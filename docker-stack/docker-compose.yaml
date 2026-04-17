@@ -59,7 +59,7 @@ services:
     image: grafana/grafana:11.4.0
     container_name: claude-analytics-grafana
     ports:
-      - "3000:3000"
+      - "13000:3000"
     volumes:
       - claude-analytics-grafana-data:/var/lib/grafana
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro

@@ -61,7 +61,7 @@ claude
 
 重启会话以使遥测生效，然后打开：
 
-**http://localhost:3000** (admin / admin)
+**http://localhost:13000** (admin / admin)
 
 导航至：**Home > Dashboards > Claude Analytics > Claude Analytics - OTel Overview**
 

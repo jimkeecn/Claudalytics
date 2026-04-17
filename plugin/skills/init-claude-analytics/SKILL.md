@@ -69,6 +69,7 @@ node -e "try{console.log(require('./package.json').name)}catch(e){process.exit(1
 Convert underscores to hyphens. Validate: letters, digits, hyphens only.
 
 **Always ask the user to confirm the detected name** using `AskUserQuestion`:
+
 - **Use "<DETECTED_NAME>" (Recommended)** — accept the auto-detected name
 - **Enter custom name** — let the user type a different name
 
@@ -85,6 +86,7 @@ Read `.claude/analytics.json`.
 **File exists** → compare against Compatibility Versions above.
 
 All match → `INSTALL_MODE` = `current`. Verify OTel + hooks in settings.local.json are correct:
+
 - `OTEL_RESOURCE_ATTRIBUTES` has correct project name
 - `CLAUDE_CODE_ENABLE_TELEMETRY` = `1`
 - `hooks` object has correct `projectName` in URLs
@@ -96,6 +98,7 @@ All match → `INSTALL_MODE` = `current`. Verify OTel + hooks in settings.local.
 If all correct → skip to Step 6. If ANY check fails → `INSTALL_MODE` = `repair`, proceed to Step 4.
 
 Some differ → `INSTALL_MODE` = `update`. Store flags:
+
 - `UPDATE_HEALTH_CHECK` = true if `health_check_script` differs
 - `UPDATE_FORWARD` = true if `forward_script` differs
 - `UPDATE_HOOKS_CONFIG` = true if `hooks_config` differs
@@ -147,6 +150,7 @@ OTEL_RESOURCE_ATTRIBUTES           = project.name=<PROJECT_NAME>
 **`fresh` or `repair`** → invoke BOTH install skills.
 
 **`update`** → invoke ONLY skills for mismatched scripts:
+
 - `UPDATE_HEALTH_CHECK` = true → `Skill` tool: `install-hook-health-check`
 - `UPDATE_FORWARD` = true → `Skill` tool: `install-hook-forward`
 - Script already current → skip, record `up to date`.
@@ -191,6 +195,7 @@ Merge with existing hooks. If event already has analytics URL, replace it. Remov
 ### Part D: Verify
 
 Write `.claude/settings.local.json`. Read back and confirm:
+
 1. `OTEL_RESOURCE_ATTRIBUTES` has correct project name
 2. `hooks` object has all events (19 HTTP + 6 command-only + SessionStart)
 3. HTTP hook URLs contain correct `projectName`
@@ -225,7 +230,7 @@ Check services:
 ```bash
 curl -sf -o /dev/null -w "%{http_code}" http://localhost:8123/ 2>/dev/null
 curl -sf -o /dev/null -w "%{http_code}" http://localhost:13133/
-curl -sf -o /dev/null -w "%{http_code}" http://localhost:3000/api/health
+curl -sf -o /dev/null -w "%{http_code}" http://localhost:13000/api/health
 ```
 
 Present:
@@ -240,7 +245,7 @@ Claude Analytics — Project Connected
   Services
     ClickHouse      http://localhost:8123   [STATUS]
     OTel Collector  http://localhost:4317   [STATUS]
-    Grafana         http://localhost:3000   [STATUS]
+    Grafana         http://localhost:13000  [STATUS]
     Hooks Server    http://localhost:4319   [STATUS]
 
   OTel: [configured / skipped]
@@ -254,7 +259,7 @@ Claude Analytics — Project Connected
     forward_script       1.0.0  ✓
     hooks_config         1.0.0  ✓
 
-  Dashboard: http://localhost:3000/d/claude-otel-overview
+  Dashboard: http://localhost:13000/d/claude-otel-overview
   Grafana: admin / admin
 
   ACTION REQUIRED: Restart Claude Code session for OTel to take effect.

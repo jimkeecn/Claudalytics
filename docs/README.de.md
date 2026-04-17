@@ -61,7 +61,7 @@ Folge den Eingabeaufforderungen — bestatige deinen Projektnamen, und der Skill
 
 Starte deine Session neu, damit die Telemetrie wirksam wird, und oeffne dann:
 
-**http://localhost:3000** (admin / admin)
+**http://localhost:13000** (admin / admin)
 
 Navigiere zu: **Home > Dashboards > Claude Analytics > Claude Analytics - OTel Overview**
 
