@@ -200,3 +200,17 @@ The Docker Compose file works on a cloud server as-is — but without these secu
 If this project helps your workflow, give it a star!
 
 </div>
+
+## FAQ
+
+### My ports are available from `/preflight-check` but docker build still has port issue.
+
+If you have winNAT is running. please run the following commands in PowerShell (**Run as administrator**)
+
+1. Step 1 - stop WinNAT (Release dynamic exclusions or reserved ports)
+   `net stop winnat`
+
+2. Step 2 - start it back (re-allocates from a different offset, usually avoids 4318)
+   `net start winnat`
+
+Then re-run /preflight-check and retry docker compose up -d --build
