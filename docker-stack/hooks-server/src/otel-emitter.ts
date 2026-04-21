@@ -1,24 +1,27 @@
-const {
+import {
   LoggerProvider,
   BatchLogRecordProcessor,
-} = require("@opentelemetry/sdk-logs");
-const { OTLPLogExporter } = require("@opentelemetry/exporter-logs-otlp-http");
-const { resourceFromAttributes } = require("@opentelemetry/resources");
-const { ATTR_SERVICE_NAME } = require("@opentelemetry/semantic-conventions");
-const { SeverityNumber } = require("@opentelemetry/api-logs");
+} from "@opentelemetry/sdk-logs";
+import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
+import { resourceFromAttributes } from "@opentelemetry/resources";
+import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
+import { SeverityNumber, type Logger } from "@opentelemetry/api-logs";
 
 const OTEL_ENDPOINT =
   process.env.OTEL_ENDPOINT || "http://localhost:4318/v1/logs";
 
 const MAX_PROVIDERS = 50;
-const providers = new Map();
-const loggers = new Map();
+const providers = new Map<string, LoggerProvider>();
+const loggers = new Map<string, Logger>();
 
-function getOrCreateLogger(projectName) {
-  if (loggers.has(projectName)) return loggers.get(projectName);
+function getOrCreateLogger(projectName: string): Logger | undefined {
+  const existing = loggers.get(projectName);
+  if (existing) return existing;
 
   if (providers.size >= MAX_PROVIDERS) {
-    console.warn(`  OTel: max providers (${MAX_PROVIDERS}) reached, reusing "default" for project: ${projectName}`);
+    console.warn(
+      `  OTel: max providers (${MAX_PROVIDERS}) reached, reusing "default" for project: ${projectName}`,
+    );
     return loggers.values().next().value;
   }
 
@@ -42,8 +45,12 @@ function getOrCreateLogger(projectName) {
   return logger;
 }
 
-function emitLog(projectName, attributes) {
+export function emitLog(
+  projectName: string,
+  attributes: Record<string, string>,
+): void {
   const logger = getOrCreateLogger(projectName);
+  if (!logger) return;
   logger.emit({
     body: attributes["event.name"] || "hooks.unknown",
     severityNumber: SeverityNumber.INFO,
@@ -51,13 +58,11 @@ function emitLog(projectName, attributes) {
   });
 }
 
-async function shutdownOtel() {
-  for (const [name, provider] of providers) {
+export async function shutdownOtel(): Promise<void> {
+  for (const [, provider] of providers) {
     await provider.shutdown();
   }
   providers.clear();
   loggers.clear();
   console.log("  OTel emitters shut down.");
 }
-
-module.exports = { emitLog, shutdownOtel };

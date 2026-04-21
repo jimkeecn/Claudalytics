@@ -2,14 +2,25 @@
   "name": "hooks-capture-server",
   "version": "1.0.0",
   "description": "Captures raw Claude Code hook events for schema inspection",
-  "main": "server.js",
+  "main": "dist/server.js",
   "scripts": {
-    "start": "node server.js"
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src"
   },
   "dependencies": {
+    "@opentelemetry/api-logs": "^0.214.0",
     "@opentelemetry/exporter-logs-otlp-http": "^0.214.0",
     "@opentelemetry/resources": "^2.6.1",
     "@opentelemetry/sdk-logs": "^0.214.0",
     "@opentelemetry/semantic-conventions": "^1.40.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "@types/node": "~20.11.30",
+    "eslint": "^9.39.4",
+    "typescript": "~5.6.3",
+    "typescript-eslint": "^8.59.0"
   }
 }

@@ -1,13 +1,17 @@
-const http = require("http");
-const fs = require("fs");
-const path = require("path");
+import * as http from "node:http";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 const CLICKHOUSE_URL = process.env.CLICKHOUSE_URL || "http://localhost:8123";
-const SQL_DIR = path.join(__dirname, "sql");
+const SQL_DIR = path.join(__dirname, "..", "sql");
 const POLL_INTERVAL_MS = 30000;
-const SERVER_VERSION = require("./package.json").version;
+const SERVER_VERSION: string = (() => {
+  const pkgPath = path.join(__dirname, "..", "package.json");
+  const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8")) as { version: string };
+  return pkg.version;
+})();
 
-const EXPECTED_TABLES = [
+export const EXPECTED_TABLES: readonly string[] = [
   "sessions",
   "credential_exposures",
   "file_mutations",
@@ -16,7 +20,7 @@ const EXPECTED_TABLES = [
   "websites_visited",
 ];
 
-const EXPECTED_MVS = [
+export const EXPECTED_MVS: readonly string[] = [
   "sessions_mv",
   "credential_exposures_mv",
   "file_mutations_edit_mv",
@@ -50,7 +54,15 @@ GROUP BY
     ResourceAttributes['project.name']
 `;
 
-const MIGRATIONS = [
+interface Migration {
+  version: number;
+  name: string;
+  type: "additive" | "destructive";
+  description: string;
+  sqlFiles: string[];
+}
+
+const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
     name: "initial_schema",
@@ -71,15 +83,17 @@ const MIGRATIONS = [
   },
 ];
 
-let bootstrapStatus = "pending";
-let currentSchemaVersion = -1;
-let tableStatus = {};
-let pendingMigrations = [];
+type BootstrapStatus = "pending" | "complete" | "error";
 
-function chQuery(sql) {
+let bootstrapStatus: BootstrapStatus = "pending";
+let currentSchemaVersion = -1;
+let tableStatus: Record<string, boolean> = {};
+const pendingMigrations: string[] = [];
+
+function chQuery(sql: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const url = new URL(CLICKHOUSE_URL);
-    const options = {
+    const options: http.RequestOptions = {
       hostname: url.hostname,
       port: url.port,
       path: "/",
@@ -89,7 +103,9 @@ function chQuery(sql) {
     };
     const req = http.request(options, (res) => {
       let body = "";
-      res.on("data", (chunk) => (body += chunk));
+      res.on("data", (chunk: Buffer | string) => {
+        body += chunk.toString();
+      });
       res.on("end", () => {
         if (res.statusCode === 200) resolve(body.trim());
         else reject(new Error(`ClickHouse ${res.statusCode}: ${body.trim()}`));
@@ -105,14 +121,12 @@ function chQuery(sql) {
   });
 }
 
-async function tableExists(tableName) {
-  const result = await chQuery(
-    `EXISTS TABLE claudalytics.${tableName}`,
-  );
+async function tableExists(tableName: string): Promise<boolean> {
+  const result = await chQuery(`EXISTS TABLE claudalytics.${tableName}`);
   return result === "1";
 }
 
-async function ensureSchemaVersionTable() {
+async function ensureSchemaVersionTable(): Promise<void> {
   await chQuery(`
     CREATE TABLE IF NOT EXISTS claudalytics.schema_version (
       version UInt32,
@@ -123,7 +137,7 @@ async function ensureSchemaVersionTable() {
   `);
 }
 
-async function getSchemaVersion() {
+async function getSchemaVersion(): Promise<number> {
   const result = await chQuery(
     "SELECT max(version) FROM claudalytics.schema_version",
   );
@@ -131,13 +145,17 @@ async function getSchemaVersion() {
   return isNaN(ver) ? 0 : ver;
 }
 
-async function recordMigration(version, name, description) {
+async function recordMigration(
+  version: number,
+  name: string,
+  description: string,
+): Promise<void> {
   await chQuery(
     `INSERT INTO claudalytics.schema_version (version, name, description) VALUES (${version}, '${name}', '${description}')`,
   );
 }
 
-function splitSqlStatements(content) {
+function splitSqlStatements(content: string): string[] {
   const cleaned = content
     .split("\n")
     .filter((line) => !line.trimStart().startsWith("--"))
@@ -151,7 +169,7 @@ function splitSqlStatements(content) {
   return statements;
 }
 
-async function executeSqlFile(filename) {
+async function executeSqlFile(filename: string): Promise<boolean> {
   const filePath = path.join(SQL_DIR, filename);
   if (!fs.existsSync(filePath)) {
     console.log(`  [bootstrap] SQL file not found: ${filename}`);
@@ -165,9 +183,10 @@ async function executeSqlFile(filename) {
     try {
       await chQuery(stmt);
     } catch (err) {
-      if (err.message.includes("already exists")) continue;
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes("already exists")) continue;
       console.error(
-        `  [bootstrap] Error in ${filename}: ${err.message.slice(0, 200)}`,
+        `  [bootstrap] Error in ${filename}: ${message.slice(0, 200)}`,
       );
       return false;
     }
@@ -175,7 +194,7 @@ async function executeSqlFile(filename) {
   return true;
 }
 
-async function applyMigration(migration) {
+async function applyMigration(migration: Migration): Promise<boolean> {
   console.log(
     `  [bootstrap] Applying v${migration.version}: ${migration.name}`,
   );
@@ -190,9 +209,7 @@ async function applyMigration(migration) {
     console.warn(
       `  [bootstrap] WARNING: Migration v${migration.version} is type '${migration.type}' — skipping (requires manual intervention)`,
     );
-    pendingMigrations.push(
-      `v${migration.version}_${migration.name}`,
-    );
+    pendingMigrations.push(`v${migration.version}_${migration.name}`);
     return false;
   }
 
@@ -207,8 +224,8 @@ async function applyMigration(migration) {
   return true;
 }
 
-async function checkTableStatus() {
-  const status = {};
+async function checkTableStatus(): Promise<Record<string, boolean>> {
+  const status: Record<string, boolean> = {};
   for (const table of [...EXPECTED_TABLES, "otel_logs", "schema_version"]) {
     try {
       status[table] = await tableExists(table);
@@ -226,17 +243,23 @@ async function checkTableStatus() {
   return status;
 }
 
-async function runBootstrap() {
+export function runBootstrap(): void {
   console.log("\n  [bootstrap] Starting ClickHouse bootstrap...");
   console.log(`  [bootstrap] ClickHouse URL: ${CLICKHOUSE_URL}`);
   console.log(`  [bootstrap] SQL directory: ${SQL_DIR}`);
 
-  const poll = async () => {
+  const schedulePoll = (delay: number): void => {
+    setTimeout(() => {
+      void poll();
+    }, delay);
+  };
+
+  const poll = async (): Promise<void> => {
     try {
       await chQuery("SELECT 1");
     } catch {
       console.log("  [bootstrap] ClickHouse not ready, retrying in 30s...");
-      setTimeout(poll, POLL_INTERVAL_MS);
+      schedulePoll(POLL_INTERVAL_MS);
       return;
     }
 
@@ -246,7 +269,7 @@ async function runBootstrap() {
         console.log(
           "  [bootstrap] otel_logs not yet created (waiting for first OTel data)... retrying in 30s",
         );
-        setTimeout(poll, POLL_INTERVAL_MS);
+        schedulePoll(POLL_INTERVAL_MS);
         return;
       }
 
@@ -258,9 +281,8 @@ async function runBootstrap() {
         `  [bootstrap] Current schema version: v${currentSchemaVersion}`,
       );
 
-      const latestVersion = MIGRATIONS.length > 0
-        ? MIGRATIONS[MIGRATIONS.length - 1].version
-        : 0;
+      const latestVersion =
+        MIGRATIONS.length > 0 ? MIGRATIONS[MIGRATIONS.length - 1]!.version : 0;
 
       if (currentSchemaVersion >= latestVersion) {
         console.log(
@@ -283,9 +305,8 @@ async function runBootstrap() {
           console.log("  [bootstrap] ✓ sessions_mv created");
         }
       } catch (err) {
-        console.log(
-          `  [bootstrap] sessions_mv: ${err.message.slice(0, 100)}`,
-        );
+        const message = err instanceof Error ? err.message : String(err);
+        console.log(`  [bootstrap] sessions_mv: ${message.slice(0, 100)}`);
       }
 
       tableStatus = await checkTableStatus();
@@ -294,16 +315,25 @@ async function runBootstrap() {
         `  [bootstrap] ✓ Bootstrap complete — schema v${currentSchemaVersion}\n`,
       );
     } catch (err) {
-      console.error(`  [bootstrap] Error: ${err.message}`);
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`  [bootstrap] Error: ${message}`);
       bootstrapStatus = "error";
-      setTimeout(poll, POLL_INTERVAL_MS);
+      schedulePoll(POLL_INTERVAL_MS);
     }
   };
 
-  setTimeout(poll, 5000);
+  schedulePoll(5000);
 }
 
-function getHealthInfo() {
+export interface HealthInfo {
+  version: string;
+  schema_version: number;
+  bootstrap: BootstrapStatus;
+  tables: Record<string, boolean>;
+  mvs_pending: string[];
+}
+
+export function getHealthInfo(): HealthInfo {
   return {
     version: SERVER_VERSION,
     schema_version: currentSchemaVersion,
@@ -312,10 +342,3 @@ function getHealthInfo() {
     mvs_pending: pendingMigrations,
   };
 }
-
-module.exports = {
-  runBootstrap,
-  getHealthInfo,
-  EXPECTED_TABLES,
-  EXPECTED_MVS,
-};
