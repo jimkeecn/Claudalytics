@@ -1,24 +1,5 @@
----
-name: install-hook-health-check
-description: Install the SessionStart health check script (.claude/hooks/session-start-health-check.sh). Always writes the script when invoked.
----
-
-# install-hook-health-check
-
-## Step 1 — Create directory
-
-```bash
-mkdir -p .claude/hooks
-```
-
-## Step 2 — Write script
-
-Write this exact content to `.claude/hooks/session-start-health-check.sh`:
-
-```bash
 #!/usr/bin/env bash
-# Claudalytics - SessionStart health check hook
-# VERSION: 1.0.0
+# Claudalytics - SessionStart health check hook (plugin-hosted).
 
 DOCKER_CONTAINERS=("claudalytics-clickhouse" "claudalytics-otel" "claudalytics-grafana" "claudalytics-hooks")
 HOOKS_SERVER_URL="http://localhost:4319/health"
@@ -74,27 +55,3 @@ escaped_sysmsg=$(escape_for_json "$sysmsg")
 printf '{\n  "hookSpecificOutput": {\n    "hookEventName": "SessionStart",\n    "additionalContext": "%s"\n  },\n  "systemMessage": "%s"\n}\n' "$escaped_context" "$escaped_sysmsg"
 
 exit 0
-```
-
-## Step 3 — Verify the written file
-
-Use the Read tool to read `.claude/hooks/session-start-health-check.sh` back, then compare it **line-by-line** against the script content in Step 2. Transcription errors are common in multi-line bash — actively look for:
-
-- Positional parameters: `$1`, `$2`, `$@`, `$#` — easy to drop the digit (`$1` → `$`)
-- Quoted expansions: `"$var"`, `"${var}"`, `"$1"` — easy to mismatch quotes or drop content
-- Escape sequences inside printf / strings: `\\`, `\"`, `\n`, `\r`, `\t`
-- Pipe chains and redirects: `2>/dev/null`, `>&2`, `|`, `&&`, `||`
-- Array syntax: `"${arr[@]}"`, `"${arr[*]}"`
-- The `printf` format string at the end — the sequence of `\n`, `"`, `{`, `}` characters is easy to corrupt
-
-If ANY character differs from the source block, **re-write the file** using the exact Step 2 content, and re-verify. Do NOT proceed to Step 4 until the written file matches byte-for-byte.
-
-## Step 4 — Make executable
-
-```bash
-chmod +x .claude/hooks/session-start-health-check.sh
-```
-
-## Step 5 — Return
-
-Return `installed (v1.0.0)` to the caller.
