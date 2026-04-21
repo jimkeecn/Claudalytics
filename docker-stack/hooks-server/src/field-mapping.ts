@@ -61,7 +61,7 @@ function prop(obj: unknown, key: string): unknown {
   return undefined;
 }
 
-function safeBooleanString(value: unknown): string {
+export function safeBooleanString(value: unknown): string {
   if (value === true) return "true";
   if (value === false) return "false";
   if (typeof value === "string") {
@@ -74,7 +74,7 @@ function safeBooleanString(value: unknown): string {
 
 const URL_PATTERN = /\bhttps?:\/\/[^\s"'`<>|;&)\\]+/gi;
 
-function extractUrlsFromCommand(command: unknown): string[] {
+export function extractUrlsFromCommand(command: unknown): string[] {
   if (typeof command !== "string" || command.length === 0) return [];
   const matches = command.match(URL_PATTERN) || [];
   const seen = new Set<string>();

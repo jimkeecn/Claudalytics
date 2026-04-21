@@ -155,7 +155,7 @@ async function recordMigration(
   );
 }
 
-function splitSqlStatements(content: string): string[] {
+export function splitSqlStatements(content: string): string[] {
   const cleaned = content
     .split("\n")
     .filter((line) => !line.trimStart().startsWith("--"))
