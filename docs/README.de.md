@@ -14,7 +14,7 @@ Keine Cloud-Abhaengigkeiten. Deine Daten bleiben auf deinem Rechner.
 [![ClickHouse](https://img.shields.io/badge/ClickHouse-24.8-yellow)]()
 [![Grafana](https://img.shields.io/badge/Grafana-11.4-orange)]()
 
-[Installation](#installation) · [Funktionen](#funktionen) · [Aktualisierung](#aktualisierung) · [Teamnutzung](#teamnutzung) · [Sprachen](#sprachen)
+[Installation](#installation) · [Funktionen](#funktionen) · [Aktualisierung](#aktualisierung) · [Teamnutzung](#teamnutzung) · [Changelog](../CHANGELOG.md)
 
 </div>
 
@@ -67,9 +67,22 @@ cd ..
 
 Fuehre `/validate-infra` aus, um zu pruefen, ob alle 4 Container, Tabellen und Materialized Views ordnungsgemaess funktionieren.
 
-### 3. Plugin in deinem Projekt installieren
+### 3. Plugin installieren
 
-Oeffne ein beliebiges Projekt in Claude Code und installiere das Plugin:
+Fuege den Claudalytics-Marketplace hinzu und installiere das Plugin in einem beliebigen Projekt:
+
+```
+/plugin marketplace add jimkeecn/Claudalytics
+/plugin install claudalytics@claudalytics
+```
+
+An ein bestimmtes Release binden:
+
+```
+/plugin marketplace add jimkeecn/Claudalytics@v1.1.0
+```
+
+**Lokale Entwicklung** — Wenn du am Plugin-Code selbst arbeitest, installiere stattdessen direkt aus deinem lokalen Checkout:
 
 ```
 /install-plugin /full/path/to/Claudalytics/plugin
@@ -158,6 +171,8 @@ Identifiziere Performance-Engpaesse — welche Tools bei p50/p95 am langsamsten 
 
 ## Aktualisierung
 
+Siehe [CHANGELOG.md](../CHANGELOG.md) fuer die Liste der Aenderungen pro Release.
+
 ```bash
 cd Claudalytics
 git pull
@@ -167,7 +182,7 @@ docker compose up -d --build
 
 Additive Schema-Aenderungen (neue Tabellen, neue Materialized Views) werden beim Start des hooks-server automatisch angewendet. Wenn ein Release destruktive Schema-Aenderungen enthaelt (Spaltentyp-Aenderungen, Neu-Partitionierung), fuehre `/migrate-db` im Claudalytics-Projekt aus — es fuehrt dich durch eine sichere Side-by-Side-Migration mit Backup-Aufforderungen.
 
-Fuehre anschliessend `/init-claudalytics` in jedem Projekt erneut aus, um Hook-Skripte und Konfiguration zu aktualisieren, falls eine neue Version verfuegbar ist. Der Skill aktualisiert nur veraltete Teile — bereits aktuelle werden nicht veraendert.
+Hook-Skripte und Hook-Deklarationen werden jetzt mit dem Plugin ausgeliefert. Ein `git pull` und das Neuladen des Plugins reichen daher aus, um Hook-Aenderungen zu uebernehmen. Wenn du von 1.0.0 aktualisierst, fuehre `/init-claudalytics` in jedem Projekt einmalig erneut aus — es entfernt die veralteten projektlokalen Hook-Dateien aus `.claude/hooks/` und raeumt abgelaufene Hook-Eintraege aus `.claude/settings.local.json`. OTel-Umgebungsvariablen und dein Projektname bleiben erhalten.
 
 ---
 
@@ -175,10 +190,11 @@ Fuehre anschliessend `/init-claudalytics` in jedem Projekt erneut aus, um Hook-S
 
 Dieses Projekt ist fuer einzelne Entwickler konzipiert. Um es fuer ein Team anzupassen:
 
-1. **Auf einem gemeinsamen Server bereitstellen** — der Docker-Stack funktioniert auf jedem Server. Jeder Entwickler richtet seinen OTel-Endpunkt und die Hooks-URL auf die Serveradresse statt auf localhost
-2. **Team-Attribut hinzufuegen** — `team.name` in `OTEL_RESOURCE_ATTRIBUTES` neben `project.name` einfuegen
-3. **ClickHouse-Tabellen aktualisieren** — eine `team_name`-Spalte zu den Zieltabellen und Materialized Views hinzufuegen
-4. **Grafana aktualisieren** — eine Team-Dropdown-Variable hinzufuegen und alle Panels danach filtern
+1. **Auf einem gemeinsamen Server bereitstellen** — der Docker-Stack funktioniert auf jedem Server. Jeder Entwickler richtet seinen OTel-Endpunkt und die `HOOKS_URL` in `plugin/hooks/forward-hook.sh` auf die Serveradresse statt auf `localhost` aus.
+2. **Team-Attribut hinzufuegen** — `team.name` in `OTEL_RESOURCE_ATTRIBUTES` neben `project.name` einfuegen.
+3. **`team.name` im Hook-Skript weiterleiten** — `plugin/hooks/forward-hook.sh` erweitern, damit `&teamName=<TEAM>` an die Hooks-URL angehaengt wird, und den Hooks-Server so anpassen, dass er den Wert erfasst.
+4. **ClickHouse-Tabellen aktualisieren** — eine `team_name`-Spalte zu den Zieltabellen und Materialized Views hinzufuegen.
+5. **Grafana aktualisieren** — eine Team-Dropdown-Variable hinzufuegen und alle Panels danach filtern.
 
 **Bevor du den Stack auf einem Server bereitstellst, musst du ihn absichern:**
 

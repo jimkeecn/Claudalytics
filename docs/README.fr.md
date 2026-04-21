@@ -14,7 +14,7 @@ Aucune dépendance cloud. Vos données restent sur votre machine.
 [![ClickHouse](https://img.shields.io/badge/ClickHouse-24.8-yellow)]()
 [![Grafana](https://img.shields.io/badge/Grafana-11.4-orange)]()
 
-[Installation](#installation) · [Fonctionnalités](#fonctionnalités) · [Mise à jour](#mise-à-jour) · [Utilisation en équipe](#utilisation-en-équipe)
+[Installation](#installation) · [Fonctionnalités](#fonctionnalités) · [Mise à jour](#mise-à-jour) · [Utilisation en équipe](#utilisation-en-équipe) · [Changelog](../CHANGELOG.md)
 
 </div>
 
@@ -67,9 +67,22 @@ cd ..
 
 Exécutez `/validate-infra` pour vérifier que les 4 conteneurs, les tables et les vues matérialisées sont en bon état.
 
-### 3. Installer le plugin dans votre projet
+### 3. Installer le plugin
 
-Ouvrez n'importe quel projet dans Claude Code et installez le plugin :
+Ajoutez le marketplace Claudalytics et installez le plugin dans n'importe quel projet :
+
+```
+/plugin marketplace add jimkeecn/Claudalytics
+/plugin install claudalytics@claudalytics
+```
+
+Épinglez une version spécifique :
+
+```
+/plugin marketplace add jimkeecn/Claudalytics@v1.1.0
+```
+
+**Développement local** — si vous itérez sur le code du plugin lui-même, installez directement depuis votre checkout local :
 
 ```
 /install-plugin /full/path/to/Claudalytics/plugin
@@ -158,6 +171,8 @@ Identifiez les goulots d'étranglement de performance — quels outils sont les 
 
 ## Mise à jour
 
+Consultez [CHANGELOG.md](../CHANGELOG.md) pour la liste des changements de chaque version.
+
 ```bash
 cd Claudalytics
 git pull
@@ -167,7 +182,7 @@ docker compose up -d --build
 
 Les changements de schéma additifs (nouvelles tables, nouvelles vues matérialisées) sont appliqués automatiquement par le hooks-server au démarrage. Si une version inclut des changements de schéma destructifs (modification de types de colonnes, re-partitionnement), exécutez `/migrate-db` depuis le projet Claudalytics — il vous guidera à travers une migration sécurisée côte à côte avec des invites de sauvegarde.
 
-Ensuite, relancez `/init-claudalytics` dans chaque projet pour mettre à jour les scripts et la configuration des hooks si une nouvelle version est disponible. Le skill ne met à jour que ce qui est en retard — il ne touche pas à ce qui est déjà à jour.
+Les scripts et déclarations de hooks sont désormais livrés à l'intérieur du plugin. Un `git pull` suivi d'un rechargement du plugin suffit donc à récupérer les changements de hooks. Si vous effectuez une mise à jour depuis la 1.0.0, relancez `/init-claudalytics` une fois dans chaque projet — il supprimera les fichiers de hooks par projet hérités de `.claude/hooks/` et retirera les entrées de hooks obsolètes de `.claude/settings.local.json`. Les variables d'environnement OTel et le nom de votre projet sont préservés.
 
 ---
 
@@ -175,10 +190,11 @@ Ensuite, relancez `/init-claudalytics` dans chaque projet pour mettre à jour le
 
 Ce projet est conçu pour les développeurs individuels. Pour l'adapter à une équipe :
 
-1. **Déployer sur un serveur partagé** — la stack Docker fonctionne sur n'importe quel serveur. Chaque développeur pointe son endpoint OTel et l'URL des hooks vers l'adresse du serveur au lieu de localhost
-2. **Ajouter un attribut de nom d'équipe** — incluez `team.name` dans `OTEL_RESOURCE_ATTRIBUTES` en plus de `project.name`
-3. **Mettre à jour les tables ClickHouse** — ajoutez une colonne `team_name` aux tables cibles et aux vues matérialisées
-4. **Mettre à jour Grafana** — ajoutez une variable déroulante Team et filtrez tous les panneaux par celle-ci
+1. **Déployer sur un serveur partagé** — la stack Docker fonctionne sur n'importe quel serveur. Chaque développeur pointe son endpoint OTel et le `HOOKS_URL` dans `plugin/hooks/forward-hook.sh` vers l'adresse du serveur au lieu de `localhost`.
+2. **Ajouter un attribut de nom d'équipe** — incluez `team.name` dans `OTEL_RESOURCE_ATTRIBUTES` en plus de `project.name`.
+3. **Faire suivre `team.name` depuis le script de hook** — étendez `plugin/hooks/forward-hook.sh` pour ajouter `&teamName=<TEAM>` à l'URL des hooks, et mettez à jour le hooks-server pour l'enregistrer.
+4. **Mettre à jour les tables ClickHouse** — ajoutez une colonne `team_name` aux tables cibles et aux vues matérialisées.
+5. **Mettre à jour Grafana** — ajoutez une variable déroulante Team et filtrez tous les panneaux par celle-ci.
 
 **Avant de déployer sur un serveur, vous devez sécuriser la stack :**
 

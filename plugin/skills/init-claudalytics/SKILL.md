@@ -19,7 +19,8 @@ Create these tasks:
 3. `Clean up legacy install` — `Removing old per-project hook files`
 4. `Check OTel settings` — `Checking OTel settings`
 5. `Write configuration` — `Writing configuration`
-6. `Write analytics.json + report` — `Generating report`
+6. `Write analytics.json` — `Writing analytics.json`
+7. `Report` — `Generating report`
 
 ---
 
@@ -142,6 +143,8 @@ Add `.claude/analytics.json` to the project's `.gitignore` if not already presen
 
 The plugin-hosted `forward-hook.sh` reads `project_name` from this file at runtime. If the file is missing, it falls back to `basename "$CLAUDE_PROJECT_DIR"` — meaning hook events still flow, but under the directory name.
 
+Set `ACTION` for the Step 7 report: `initialized` if `.claude/analytics.json` did not exist before this run, `reconfigured` if it did.
+
 ---
 
 ## Step 7 — Report
@@ -161,7 +164,7 @@ Claudalytics — Project Connected
 =====================================
 
   Project:  <PROJECT_NAME>
-  Mode:     <fresh / update / current>
+  Action:   <initialized | reconfigured>
 
   Services
     ClickHouse      http://localhost:8123   [STATUS]

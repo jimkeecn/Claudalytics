@@ -14,7 +14,7 @@ Zero cloud dependencies. Your data stays on your machine.
 [![ClickHouse](https://img.shields.io/badge/ClickHouse-24.8-yellow)]()
 [![Grafana](https://img.shields.io/badge/Grafana-11.4-orange)]()
 
-[Installation](#installation) · [Features](#features) · [Updating](#updating) · [Team Use](#team-use) · [Languages](#languages)
+[Installation](#installation) · [Features](#features) · [Updating](#updating) · [Team Use](#team-use) · [Changelog](CHANGELOG.md)
 
 </div>
 
@@ -67,9 +67,22 @@ cd ..
 
 Run `/validate-infra` to verify all 4 containers, tables, and materialized views are healthy.
 
-### 3. Install the plugin in your project
+### 3. Install the plugin
 
-Open any project in Claude Code and install the plugin:
+Add the Claudalytics marketplace and install the plugin in any project:
+
+```
+/plugin marketplace add jimkeecn/Claudalytics
+/plugin install claudalytics@claudalytics
+```
+
+Pin to a specific release:
+
+```
+/plugin marketplace add jimkeecn/Claudalytics@v1.1.0
+```
+
+**Local development** — if you're iterating on the plugin code itself, install directly from your local checkout instead:
 
 ```
 /install-plugin /full/path/to/Claudalytics/plugin
@@ -158,6 +171,8 @@ Identify performance bottlenecks — which tools are slowest at p50/p95, and whi
 
 ## Updating
 
+See [CHANGELOG.md](CHANGELOG.md) for the list of changes in each release.
+
 ```bash
 cd Claudalytics
 git pull
@@ -167,7 +182,7 @@ docker compose up -d --build
 
 Additive schema changes (new tables, new materialized views) are applied automatically by the hooks-server on startup. If a release includes destructive schema changes (column type changes, re-partitioning), run `/migrate-db` from the Claudalytics project — it will walk you through a safe, side-by-side migration with backup prompts.
 
-Then re-run `/init-claudalytics` in each project to update hook scripts and configuration if a new version is available. The skill only updates what's behind — it won't touch what's already current.
+Hook scripts and hook declarations now ship inside the plugin, so a `git pull` + plugin reload is enough to pick up hook changes. If you are upgrading from 1.0.0, re-run `/init-claudalytics` once in each project — it will sweep the legacy per-project hook files out of `.claude/hooks/` and strip the stale hook entries from `.claude/settings.local.json`. OTel env vars and your project name are preserved.
 
 ---
 
@@ -175,11 +190,11 @@ Then re-run `/init-claudalytics` in each project to update hook scripts and conf
 
 This project is designed for individual developers. To adapt it for a team:
 
-1. **Deploy to a shared server** — the Docker stack works on any server. Each developer points their OTel endpoint and hooks URL to the server address instead of localhost
-2. **Add a team name attribute** — include `team.name` in `OTEL_RESOURCE_ATTRIBUTES` alongside `project.name`
-3. **Update the forward skills** to forwarding the team.name as well in the forward scripts.
-4. **Update ClickHouse tables** — add a `team_name` column to the target tables and materialized views
-5. **Update Grafana** — add a Team dropdown variable and filter all panels by it
+1. **Deploy to a shared server** — the Docker stack works on any server. Each developer points their OTel endpoint and the `HOOKS_URL` inside `plugin/hooks/forward-hook.sh` to the server address instead of `localhost`.
+2. **Add a team name attribute** — include `team.name` in `OTEL_RESOURCE_ATTRIBUTES` alongside `project.name`.
+3. **Forward `team.name` from the hook script** — extend `plugin/hooks/forward-hook.sh` to append `&teamName=<TEAM>` to the hooks URL, and update the hooks server to record it.
+4. **Update ClickHouse tables** — add a `team_name` column to the target tables and materialized views.
+5. **Update Grafana** — add a Team dropdown variable and filter all panels by it.
 
 **Before deploying to a server, you must secure the stack:**
 

@@ -1,0 +1,30 @@
+{
+  "name": "claudalytics",
+  "owner": {
+    "name": "jimkeecn",
+    "email": "jimkeecn@gmail.com"
+  },
+  "metadata": {
+    "description": "OTel + Hooks analytics for Claude Code. Local ClickHouse + Grafana stack with zero cloud dependencies."
+  },
+  "plugins": [
+    {
+      "name": "claudalytics",
+      "source": "./plugin",
+      "description": "OTel + Hooks analytics for Claude Code. Captures telemetry and hook events into ClickHouse, visualises via Grafana dashboards.",
+      "version": "1.1.0",
+      "homepage": "https://github.com/jimkeecn/Claudalytics",
+      "repository": "https://github.com/jimkeecn/Claudalytics",
+      "license": "MIT",
+      "keywords": [
+        "analytics",
+        "telemetry",
+        "otel",
+        "hooks",
+        "clickhouse",
+        "grafana"
+      ],
+      "category": "analytics"
+    }
+  ]
+}
