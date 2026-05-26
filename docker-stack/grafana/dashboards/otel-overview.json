@@ -9,7 +9,7 @@
   },
   "timepicker": {},
   "schemaVersion": 39,
-  "version": 6,
+  "version": 7,
   "templating": {
     "list": [
       {
@@ -511,6 +511,64 @@
             "matcher": {
               "id": "byName",
               "options": "last_used"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 29,
+      "title": "Memory Files",
+      "description": "Auto-memory file writes (Write/Edit) into user-project memory folders (~/.claude/projects/<proj>/memory/). Sourced from file_mutations. Note: memory recall/load is not observable — writes only.",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 92,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-claudalytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT project_name AS project, file_name AS file, action, count() AS writes, max(timestamp) AS last_written FROM claudalytics.file_mutations WHERE $__timeFilter(toDateTime(timestamp)) AND positionCaseInsensitive(directory, '.claude/projects/') > 0 AND positionCaseInsensitive(directory, '/memory') > 0 AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) GROUP BY project, file, action ORDER BY last_written DESC LIMIT 200",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "last_written",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last_written"
             },
             "properties": [
               {
