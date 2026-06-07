@@ -1,0 +1,647 @@
+<!doctype html>
+<!-- lesson05/index.html — B2: Watching the graph: workflow events -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>B2 · Workflow events — MAF Curriculum</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="05">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">Curriculum</a> / Module B / B2
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">Lesson 05 · B2 · Module B — The graph</p>
+            <h1>Watching the graph: workflow events</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★</span>
+              <span class="badge badge--cost">No LLM</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>What you'll learn</h2>
+          <p>
+            A Claudalytics Copilot investigation runs many steps inside the
+            graph: it plans probes, runs them, validates, and writes a report.
+            Without events you cannot see which probe is running, why one
+            failed, or stream progress to the UI. The run is a black box until
+            it ends.
+          </p>
+          <p>
+            Every workflow run emits a live stream of typed events. You read it
+            from the same <code>StreamingRun</code> you already hold. In this
+            lesson you wire a driver that reads that stream and builds a typed
+            event timeline next to the final result. You also learn to emit your
+            own events from inside executors. After B2 you have a debugging
+            window that travels with the graph through every later lesson.
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 Teach</span>
+            <h3>The built-in event stream</h3>
+            <p>
+              When you call
+              <code>InProcessExecution.RunStreamingAsync(…)</code> you get back
+              a <code>StreamingRun</code>. Call
+              <code>run.WatchStreamAsync(ct)</code> on it to get an
+              <code>IAsyncEnumerable&lt;WorkflowEvent&gt;</code>. The framework
+              emits these concrete subtypes automatically:
+            </p>
+            <ul>
+              <li>
+                <strong><code>WorkflowStartedEvent</code></strong> — run has
+                begun.
+              </li>
+              <li>
+                <strong
+                  ><code>SuperStepStartedEvent</code> /
+                  <code>SuperStepCompletedEvent</code></strong
+                >
+                — one frontier advance: the concurrent batch of nodes that fired
+                together.
+              </li>
+              <li>
+                <strong><code>ExecutorInvokedEvent</code></strong> — a named
+                executor is about to run; carries <code>ExecutorId</code>.
+              </li>
+              <li>
+                <strong><code>ExecutorCompletedEvent</code></strong> — that
+                executor finished normally.
+              </li>
+              <li>
+                <strong><code>ExecutorFailedEvent</code></strong> — the executor
+                threw; the exception lives in <code>evt.Data</code>. Call
+                <code>.GetBaseException().Message</code> to surface the root
+                cause — the default <code>.ToString()</code> is a stack trace
+                wall.
+              </li>
+              <li>
+                <strong><code>WorkflowOutputEvent</code></strong> — a
+                <code>[YieldsOutput]</code> executor produced the final result;
+                read it from <code>evt.Data</code>.
+              </li>
+              <li>
+                <strong><code>RequestInfoEvent</code></strong> — the run is
+                paused waiting for a human response (covered fully in
+                <a href="../lesson17/index.html">F2</a>).
+              </li>
+            </ul>
+            <h3>Custom events from inside executors</h3>
+            <p>
+              Any executor can call
+              <code>await context.AddEventAsync(new MyEvent(…), ct)</code>. The
+              event appears in the stream between the surrounding
+              <code>ExecutorInvokedEvent</code> and
+              <code>ExecutorCompletedEvent</code>. Your custom class must extend
+              <code>WorkflowEvent</code> and pass its payload to the base
+              constructor.
+            </p>
+          </div>
+
+          <h2>How events map to the graph you built in B1</h2>
+          <p>
+            Recall the B1 pipeline from <a href="../lesson04/index.html">B1</a>:
+            a planner node fans out three probe jobs, three probe executors run
+            in parallel, a fan-in barrier feeds the collector, then output. The
+            event stream makes that structure <em>visible at runtime</em>:
+          </p>
+          <ul>
+            <li>
+              The three <code>ExecutorInvokedEvent</code>s for the probe
+              executors share the <em>same</em>
+              <code>SuperStepStartedEvent</code> /
+              <code>SuperStepCompletedEvent</code> bracket — proof that fan-out
+              parallelism is real.
+            </li>
+            <li>
+              The collector's <code>ExecutorInvokedEvent</code> appears only
+              after all three probe <code>ExecutorCompletedEvent</code>s — that
+              is the fan-in barrier enforcing its "wait for all" contract.
+            </li>
+            <li>
+              If you break one probe's SQL, an
+              <code>ExecutorFailedEvent</code> names the executor and carries
+              the exception — no guessing which node failed.
+            </li>
+          </ul>
+
+          <h2>Build it</h2>
+          <ol class="steps">
+            <li>
+              <h3>Define the custom progress event</h3>
+              <p>
+                Extend <code>WorkflowEvent</code> with a string payload. Pass
+                the message to the base constructor (the framework stores it)
+                and also expose it as a typed property so consuming code does
+                not have to cast <code>Data</code>.
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 Placement</span>
+                <p>
+                  File: <code>Workflows/InvestigationModels.cs</code> — the file
+                  already exists from <a href="../lesson04/index.html">B1</a>
+                  and starts with
+                  <code>using Microsoft.Agents.AI.Workflows;</code> at the top
+                  and <code>namespace AiAgent.Workflows;</code> below it.
+                  <strong
+                    >Append the class below inside the same
+                    <code>namespace AiAgent.Workflows</code> block</strong
+                  >, after the existing record declarations. No new NuGet needed
+                  — <code>Microsoft.Agents.AI.Workflows</code> was added in B1.
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Workflows/InvestigationModels.cs</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>/// &lt;summary&gt;Custom workflow event — executors narrate their progress with these.&lt;/summary&gt;
+public sealed class InvestigationProgressEvent(string message) : WorkflowEvent(message)
+{
+    public string Message { get; } = message;
+}</code></pre>
+              </div>
+              <p>
+                The base constructor call is what routes the event into
+                <code>WatchStreamAsync</code>. Without it the object exists but
+                the stream never sees it.
+              </p>
+            </li>
+
+            <li>
+              <h3>Emit custom events from executors</h3>
+              <p>
+                Inside any executor's <code>HandleAsync</code>, call
+                <code>context.AddEventAsync</code> with your event instance. The
+                planner announces how many probes it plans. Each probe announces
+                when it starts running. Both events land in the same stream
+                <code>DriveAsync</code> reads later in this lesson, so the
+                progress lines show up in the timeline next to the framework's
+                own events.
+              </p>
+              <p>
+                Add the first line in
+                <code>PlanExecutor.HandleAsync</code>, as the first line after
+                clamping <code>days</code>:
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs — in
+                    PlanExecutor.HandleAsync</span
+                  >
+                </div>
+                <pre class="code-block"><code>await context.AddEventAsync(
+    new InvestigationProgressEvent($"Planning {days}-day investigation: 3 probes."),
+    cancellationToken);</code></pre>
+              </div>
+              <p>
+                Add the second line in
+                <code>ProbeExecutor.HandleAsync</code>, before the ClickHouse
+                call:
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs — in
+                    ProbeExecutor.HandleAsync</span
+                  >
+                </div>
+                <pre class="code-block"><code>await context.AddEventAsync(
+    new InvestigationProgressEvent($"Probe '{job.Name}' running."),
+    cancellationToken);</code></pre>
+              </div>
+              <p>
+                The validator and synthesis nodes added in B3 emit progress the
+                same way. They pass a new
+                <code>InvestigationProgressEvent</code> to
+                <code>context.AddEventAsync</code> from inside their own
+                <code>HandleAsync</code>.
+              </p>
+            </li>
+
+            <li>
+              <h3>Add the WorkflowEventDto record</h3>
+              <p>
+                The raw <code>WorkflowEvent</code> hierarchy is an internal
+                type. Map it to a simple record before you return it to HTTP
+                callers or buffer it into a timeline. This record lives at
+                namespace scope — outside the class — so it is available to any
+                file in the same namespace.
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 Placement</span>
+                <p>
+                  File: <code>Workflows/InvestigationService.cs</code>. B2
+                  creates this file — it does not exist yet. Start with the
+                  minimal shell below, then add the types and methods in the
+                  steps that follow:
+                </p>
+                <pre
+                  class="code-block"
+                  style="margin: 0.5rem 0"
+                ><code>using Microsoft.Agents.AI.Workflows;
+
+namespace AiAgent.Workflows;
+
+// &lt;-- add WorkflowEventDto HERE (namespace scope, before the class)
+
+public sealed class InvestigationService(
+    Func&lt;Workflow&gt; workflowFactory, ILogger&lt;InvestigationService&gt; logger)
+{
+    private readonly Func&lt;Workflow&gt; _workflowFactory = workflowFactory;
+    private readonly ILogger&lt;InvestigationService&gt; _logger = logger;
+    // &lt;-- add InvestigationStatus HERE (still namespace scope, can go above or below the class)
+    // &lt;-- add ToDto, DriveAsync, StartAsync INSIDE this class
+}</code></pre>
+                <p>
+                  <strong>No new NuGet needed</strong> —
+                  <code>Microsoft.Agents.AI.Workflows</code> was added in B1.
+                  Checkpoint support is added in B4; do not import
+                  <code>Microsoft.Agents.AI.Workflows.Checkpointing</code> yet.
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — at namespace scope,
+                    before the class</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>/// &lt;summary&gt;One simplified workflow event, as returned to HTTP clients.&lt;/summary&gt;
+public sealed record WorkflowEventDto(string Type, string? Detail);</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Add ToDto — map raw events to DTO</h3>
+              <p>
+                Add <code>ToDto</code> as a <code>private static</code> method
+                inside <code>InvestigationService</code>. It is read by
+                <code>DriveAsync</code> in the next step: every raw event from
+                the stream is passed through <code>ToDto</code> before it goes
+                into the timeline. Use a switch expression so every event type
+                is handled on purpose. An unhandled type returns
+                <code>null</code> and is skipped.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — inside
+                    InvestigationService</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>/// &lt;summary&gt;The raw-event-stream lesson, flattened for JSON/SSE consumers.&lt;/summary&gt;
+private static WorkflowEventDto? ToDto(WorkflowEvent evt) =&gt; evt switch
+{
+    WorkflowStartedEvent                   =&gt; new("workflow_started", null),
+    SuperStepStartedEvent                  =&gt; null,
+    SuperStepCompletedEvent                =&gt; new("superstep_completed", null),
+    ExecutorInvokedEvent invoked           =&gt; new("executor_invoked",   invoked.ExecutorId),
+    ExecutorCompletedEvent completed       =&gt; new("executor_completed", completed.ExecutorId),
+    ExecutorFailedEvent failed             =&gt; new("executor_failed",
+        $"{failed.ExecutorId}: {(failed.Data as Exception)?.GetBaseException().Message ?? failed.Data?.ToString()}"),
+    InvestigationProgressEvent progress    =&gt; new("progress",          progress.Message),
+    WorkflowOutputEvent                    =&gt; new("workflow_output",    "report ready"),
+    _                                      =&gt; null,
+};</code></pre>
+              </div>
+              <p>
+                The <code>SuperStepStartedEvent</code> arm returns
+                <code>null</code>, so it is dropped for HTTP clients. It fires
+                too often and only adds noise. It is still visible in OTel
+                traces. You decide the signal-to-noise ratio at this mapping
+                layer. The raw stream is always complete.
+              </p>
+              <p>
+                There is no arm for <code>RequestInfoEvent</code> yet. That is
+                the approval-pause event. F2 adds its arm when the approval port
+                is introduced. Until then it falls through to the
+                <code>_</code> case and is skipped.
+              </p>
+            </li>
+
+            <li>
+              <h3>Add InvestigationStatus and DriveAsync</h3>
+              <p>
+                <code>InvestigationStatus</code> is the shape returned to the
+                HTTP caller. It carries the run id, a status string, the report
+                text, and the full event timeline. Add it at namespace scope,
+                outside the class, next to <code>WorkflowEventDto</code>. The
+                <code>Status</code> string holds one of three values:
+                <code>running</code>, <code>completed</code>, or
+                <code>failed</code>.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — namespace scope
+                    (outside InvestigationService)</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>/// &lt;summary&gt;HTTP-facing result of driving a run as far as it will go.&lt;/summary&gt;
+public sealed record InvestigationStatus(
+    string RunId,
+    string Status,
+    string? Report,
+    List&lt;WorkflowEventDto&gt; Events);</code></pre>
+              </div>
+              <p>
+                Now add <code>DriveAsync</code> as a <code>private</code> method
+                inside <code>InvestigationService</code>. It is the consumer of
+                the event stream. It reads each event with
+                <code>await foreach</code>, passes it through
+                <code>ToDto</code>, and adds the result to the
+                <code>events</code> list. It also watches for
+                <code>WorkflowOutputEvent</code> to capture the final report.
+                The list it fills is what <code>StartAsync</code> returns to the
+                <code>/investigate</code> endpoint. Human-in-the-loop pause
+                handling is added in F2.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — inside
+                    InvestigationService</span
+                  >
+                </div>
+                <pre class="code-block"><code>/// &lt;summary&gt;
+/// Consumes the raw WorkflowEvent stream until the run produces output or ends.
+/// Human-in-the-loop pause (RequestInfoEvent) is wired in F2.
+/// &lt;/summary&gt;
+private async Task&lt;InvestigationStatus&gt; DriveAsync(
+    string runId, StreamingRun run, List&lt;WorkflowEventDto&gt; events, CancellationToken ct)
+{
+    string? report = null;
+    try
+    {
+        await foreach (var evt in run.WatchStreamAsync(ct))
+        {
+            var dto = ToDto(evt);
+            if (dto is not null) events.Add(dto);
+
+            if (evt is WorkflowOutputEvent output)
+                report = output.Data?.ToString();
+        }
+    }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex, "Investigation run {RunId} failed.", runId);
+        events.Add(new("error", ex.Message));
+        return new InvestigationStatus(runId, "failed", null, events);
+    }
+
+    return new InvestigationStatus(runId, report is null ? "failed" : "completed", report, events);
+}</code></pre>
+              </div>
+              <p>
+                The loop <em>awaits</em> the stream. The act of reading the next
+                event is what drives the run forward. Nothing runs ahead of you.
+                The stream completes when the workflow graph has no more nodes
+                to fire. B4 will add checkpoint support. F2 will handle the
+                human-approval pause by storing the live run handle and
+                returning early.
+              </p>
+            </li>
+
+            <li>
+              <h3>Wire StartAsync to DriveAsync</h3>
+              <p>
+                <code>StartAsync</code> is the <code>public</code> entry point
+                that the <code>/investigate</code> endpoint calls. Add it inside
+                <code>InvestigationService</code>. It creates a fresh
+                <code>StreamingRun</code> with <code>_workflowFactory</code>,
+                then hands it to <code>DriveAsync</code> with an empty event
+                list. This is the no-checkpoint overload. Checkpoint support is
+                added in B4.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — inside
+                    InvestigationService</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>public async Task&lt;InvestigationStatus&gt; StartAsync(int days, CancellationToken ct)
+{
+    var runId = Guid.NewGuid().ToString("N");
+    var run = await InProcessExecution.RunStreamingAsync(
+        _workflowFactory(), new InvestigationRequest(days), runId, ct);
+    return await DriveAsync(runId, run, [], ct);
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Register InvestigationService in Program.cs</h3>
+              <p>
+                Register <code>InvestigationService</code> as a singleton. The
+                factory builds the B1 <code>ProbeWorkflow</code>. B3 will
+                repoint this factory to <code>InvestigationWorkflow</code> once
+                the validator and synthesis nodes are wired. Then expose a
+                <code>/investigate</code> endpoint. This endpoint is the reader
+                at the top of the chain: it calls <code>StartAsync</code>, which
+                returns the <code>InvestigationStatus</code> with the full event
+                timeline as JSON.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — service registration</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddSingleton(sp =&gt;
+    new InvestigationService(
+        () =&gt; ProbeWorkflow.Build(sp.GetRequiredService&lt;ClickHouseClient&gt;()),
+        sp.GetRequiredService&lt;ILogger&lt;InvestigationService&gt;&gt;()));
+
+// ...
+
+app.MapPost("/investigate", async (int days, InvestigationService svc, CancellationToken ct) =&gt;
+    Results.Ok(await svc.StartAsync(days, ct)));</code></pre>
+              </div>
+            </li>
+          </ol>
+
+          <h2>Why supersteps reveal parallelism</h2>
+          <p>
+            A <em>superstep</em> is a single frontier advance. All nodes whose
+            input messages are ready fire at the same time within it. In the
+            B1/B2 pipeline, the three probe executors share one superstep. This
+            is because the fan-out edge delivers all three
+            <code>ProbeJob</code> messages at once. The event stream makes this
+            fact observable at runtime. Look for three
+            <code>executor_invoked</code> entries whose
+            <code>executor_completed</code> entries all land inside the same
+            <code>superstep_completed</code>. That is free, verifiable
+            parallelism with zero LLM cost.
+          </p>
+
+          <h2>Verify</h2>
+          <div class="gate">
+            <p class="gate-title">✅ Gate — do not advance until green</p>
+            <p>
+              Start the agent with the Testing environment and POST to the
+              investigation endpoint:
+            </p>
+            <div class="codewrap">
+              <pre class="code-block"><code>dotnet run -- --environment Testing
+# In another terminal:
+curl -s -X POST "http://localhost:8124/investigate?days=7" | jq '.events[].type'</code></pre>
+            </div>
+            <p>The output must contain, in order:</p>
+            <ul>
+              <li><code>"workflow_started"</code></li>
+              <li><code>"executor_invoked"</code> for <code>plan</code></li>
+              <li>
+                <code>"progress"</code> — "Planning 7-day investigation: 3
+                probes."
+              </li>
+              <li>
+                Three <code>"executor_invoked"</code> entries for
+                <code>probe-0</code>, <code>probe-1</code>,
+                <code>probe-2</code> (order within the superstep is arbitrary)
+              </li>
+              <li>
+                Three <code>"progress"</code> entries, one per probe — "Probe
+                '…' running."
+              </li>
+              <li>
+                <code>"executor_invoked"</code> for <code>collector</code> —
+                appears only <em>after</em> all three probe
+                <code>"executor_completed"</code> entries (fan-in barrier)
+              </li>
+              <li><code>"workflow_output"</code></li>
+            </ul>
+            <p>
+              Check that the probe executor invocations share a superstep:
+              compare their indices in the <code>events</code> array; all three
+              should appear between the same pair of
+              <code>superstep_completed</code> boundaries.
+            </p>
+            <p><strong>Negative test — surface executor-failed:</strong></p>
+            <p>
+              In <code>ProbeExecutor.HandleAsync</code>, break the SQL on
+              purpose by querying a table that does not exist:
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>rows = await clickHouse.QueryAsync("SELECT * FROM nonexistent_table", cancellationToken);</code></pre>
+            </div>
+            <p>
+              Re-run the investigate endpoint. The events array should now hold
+              an <code>executor_failed</code> entry like this one:
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>{ "type": "executor_failed", "detail": "probe-0: Table nonexistent_table doesn't exist." }</code></pre>
+            </div>
+            <p>
+              The run continues. The other probes still fire. The collector
+              still receives a <code>ProbeResult</code> with
+              <code>hasData = false</code> for the broken probe.
+            </p>
+            <p>
+              Check that <code>executor_failed</code> carries the base exception
+              message, which is the table name. It must not carry a full stack
+              trace. If you see a multi-line dump, the
+              <code>GetBaseException().Message</code> extraction in
+              <code>ToDto</code> is not reaching the event. Recheck the
+              <code>ExecutorFailedEvent</code> arm of the switch expression.
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ Pitfalls</span>
+            <ul>
+              <li>
+                <strong
+                  ><code>executor_failed</code> shows a stack trace wall, not
+                  the root cause</strong
+                >
+                → <code>failed.Data</code> is an <code>Exception</code>; call
+                <code>.GetBaseException().Message</code>, not
+                <code>.ToString()</code>. The raw
+                <code>ToString()</code> includes frames that conceal the actual
+                error inside several lines of runtime internals.
+              </li>
+              <li>
+                <strong>Custom event never appears in the stream</strong>
+                → Your class must call <code>: WorkflowEvent(payload)</code> —
+                the base constructor is what registers the object with the
+                framework's event bus. A class that extends
+                <code>WorkflowEvent</code> but passes nothing to the base
+                constructor is constructed but never emitted.
+              </li>
+              <li>
+                <strong>All events arrive at the end, not incrementally</strong>
+                → You are iterating with <code>ToListAsync()</code> or
+                <code>.Result</code> instead of <code>await foreach</code>. The
+                stream must be consumed asynchronously; blocking materialisation
+                defeats the live-event contract.
+              </li>
+              <li>
+                <strong>Stream appears empty (no events at all)</strong>
+                → You are watching the stream on a different
+                <code>StreamingRun</code> instance than the one executing the
+                workflow. One common cause: calling
+                <code>_workflowFactory()</code> a second time and watching the
+                new handle. Remember: a <code>Workflow</code> is owned by
+                exactly one runner — build fresh per logical run (as the factory
+                pattern ensures), but never create two handles for the same run.
+              </li>
+              <li>
+                <strong
+                  >Probe parallelism not visible (all three probes
+                  sequential)</strong
+                >
+                → The fan-out edge or partitioner from
+                <a href="../lesson04/index.html">B1</a>
+                was not carried forward. Confirm the workflow builder still
+                registers all three probe executors and the fan-out edge; the
+                superstep grouping emerges from the edge wiring, not from the
+                event code.
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              Mark lesson complete
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

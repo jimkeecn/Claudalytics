@@ -1,0 +1,535 @@
+<!doctype html>
+<!-- lesson13/index.html — D3: Agent-as-tool + model tiering -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>D3 · 智能体即工具 + 模型分层 — MAF 课程</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="13">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">课程</a> / 模块 D / D3
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">
+              第 13 课 · D3 · 模块 D — 组合与编排（orchestration）
+            </p>
+            <h1>智能体（agent）即工具（tool） + 模型分级（model tiering）</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★</span>
+              <span class="badge badge--cost">Haiku + 1 次真实层级检查</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>你将学到什么</h2>
+          <p>
+            本课解决本应用里的两个真实问题。其一：<a
+              href="../lesson11/index.html"
+              >D1</a
+            >
+            的每周报告工作流（workflow）只能从自己的
+            <code>/report</code>
+            端点运行，用户在对话中无法临时索要。你把整个报告工作流包装成
+            DataAnalyst 上一个可调用的工具（tool），让 LLM
+            自己决定何时运行它（智能体即工具，<code>AsAIFunction</code>）。其二：没有便宜的方式跑关卡（gate）。每处模型
+            id 已经从 <code>ModelTiers</code>（在
+            <a href="../lesson01/index.html">A1</a> 引入）读取，但没有 Testing
+            覆盖时，每个关卡都打到生产层级——Analyst 是 Sonnet、Reasoning 是
+            Opus——测试循环烧真金白银。你加一个
+            <code>appsettings.Testing.json</code> 把三个层级全部塌缩到
+            Haiku，于是一个 <code>--environment Testing</code>
+            开关就让每个智能体都变便宜，无需改代码。
+          </p>
+          <p>
+            第一个手法处理<em>谁调用谁</em>；第二个处理<em>哪个模型来执行这次调用</em>。学完本课，项目里每个智能体都从同一个辅助方法读取模型，每周报告工作流也能在对话中途被调用，不再需要专门的派发步骤。
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 讲解</span>
+            <p>
+              <strong
+                >智能体（agent）即工具（tool）（<code>AsAIFunction</code>）</strong
+              >：任何 <code>AIAgent</code> 都暴露了一个
+              <code>.AsAIFunction(AIFunctionFactoryOptions)</code>
+              方法，它把整个智能体——它的工具、它的会话（session）、它的指令——包装成单个
+              <code>AIFunction</code>。把它注册到另一个智能体的
+              <code>ChatOptions.Tools</code>
+              里，外层 LLM
+              就会像调用任何其他函数那样调用它：传入一段自然语言提示，并把内层智能体的最终文本作为结果接收回来。这就是<em
+                >LLM 选择的派发</em
+              >：模型根据工具描述自行决定何时调用子智能体，这与
+              <a href="../lesson12/index.html">D2</a>
+              中由代码选择的路由器（router）形成对比——后者通过对一个带类型的路由（routing）决策做模式匹配来派发。
+            </p>
+            <p>
+              <strong
+                >模型分级（model tiering）（<code>ModelTiers</code>）</strong
+              >：一个三行的静态辅助方法，把某个任务的推理需求映射到从
+              <code>IConfiguration</code> 读取的模型字符串。层级有：
+              <strong>Light</strong>（分类、上下文压缩（compaction）摘要）、
+              <strong>Analyst</strong>（基于 schema 的 SQL 工作）、
+              <strong>Reasoning</strong
+              >（跨领域综合）。默认值作为兜底烤进代码里；
+              <code>appsettings.json</code> 按层级覆盖，而
+              <code>appsettings.Testing.json</code> 把三个层级全部覆盖成
+              Haiku，于是每个关卡（gate）都跑得很便宜。没有这层间接，每处调用点上硬编码的模型
+              id 对 Testing 覆盖是不可见的——Testing 环境设置的是
+              <code>Models:Light</code>、 <code>Models:Analyst</code> 和
+              <code>Models:Reasoning</code>，而不是一个个的字符串字面量。
+            </p>
+          </div>
+
+          <h2>动手构建</h2>
+          <ol class="steps">
+            <li>
+              <h3>确认 ModelTiers 可用，并接好 Testing 覆盖</h3>
+              <p>
+                <code>Agents/ModelTiers.cs</code> 在
+                <a href="../lesson01/index.html">A1</a>
+                就已引入——它已经存在。这里不需要新建文件。这个三层辅助方法把推理需求映射到一个从
+                <code>IConfiguration</code>
+                读取的模型字符串，并把生产环境默认值作为兜底烤进代码里。
+              </p>
+              <div class="callout callout--note">
+                <span class="callout-label">ℹ️ 已存在 — A1/lesson01</span>
+                <p>
+                  下面仅供参考重列。<strong>不要</strong>创建或覆盖此文件——它是在
+                  A1 创建的。
+                </p>
+                <div class="codewrap">
+                  <div class="code-meta">
+                    <span class="filename"
+                      >Agents/ModelTiers.cs (introduced in A1/lesson01)</span
+                    >
+                  </div>
+                  <pre
+                    class="code-block"
+                  ><code>using Microsoft.Extensions.Configuration;
+
+namespace AiAgent.Agents;
+
+/// &lt;summary&gt;
+/// Model tiering: one place that maps a job's reasoning demand to a model.
+/// Light = classification/summarization, Analyst = SQL-over-schema work,
+/// Reasoning = cross-domain synthesis and recommendations.
+/// Defaults live here; appsettings "Models" section overrides per tier.
+/// &lt;/summary&gt;
+public static class ModelTiers
+{
+    public static string Light(IConfiguration config)
+        =&gt; config["Models:Light"] ?? "claude-haiku-4-5";
+
+    public static string Analyst(IConfiguration config)
+        =&gt; config["Models:Analyst"] ?? "claude-sonnet-4-6";
+
+    public static string Reasoning(IConfiguration config)
+        =&gt; config["Models:Reasoning"] ?? "claude-opus-4-8";
+}</code></pre>
+                </div>
+              </div>
+              <p>
+                <em>真正</em>属于本课的工作：在
+                <code>appsettings.Testing.json</code> 里接好 Testing
+                覆盖，让所有层级在关卡期间塌缩到
+                Haiku。<code>AgentFactory.cs</code>、 <code>Router.cs</code> 和
+                <code>ReportWorkflow.cs</code> 里每处模型 id 已经从
+                <code>ModelTiers.*</code> 读取（你在 A1、D1、D2
+                就接好了），所以覆盖会自动触达它们。
+              </p>
+              <p>
+                这里设置的键由三个 <code>ModelTiers</code> 方法读回。带
+                <code>--environment Testing</code> 运行时，.NET
+                配置加载器把本文件叠加到
+                <code>appsettings.json</code> 之上，于是
+                <code>config["Models:Analyst"]</code> 返回 Haiku，所有从
+                <code>ModelTiers.Analyst(config)</code> 读取的调用点都拿到
+                Haiku，无需改代码。
+                <strong>这是部分摘录</strong>——完整文件还包含一个在
+                <a href="../lesson15/index.html">E2</a> 加入的
+                <code>Logging</code> 段：
+                <code>"Microsoft.Agents.AI": "Debug"</code>。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">appsettings.Testing.json</span>
+                </div>
+                <pre class="code-block"><code>{
+  "Models": {
+    "Light":     "claude-haiku-4-5",
+    "Analyst":   "claude-haiku-4-5",
+    "Reasoning": "claude-haiku-4-5"
+  }
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>把报告智能体作为一个具名工具注册到 DataAnalyst 上</h3>
+              <p>
+                在 <code>AgentFactory.cs</code> 里，报告工作流（在
+                <a href="../lesson11/index.html">D1</a> 构建）以一个
+                <code>AIAgent</code> 参数传入。在它上面调用
+                <code>.AsAIFunction()</code>
+                并给一段精确描述——这段描述是外层模型决定何时运行报告的唯一依据。把它和现有
+                SQL 工具一起注册进 <code>ChatOptions.Tools</code>，报告就成了
+                LLM 工具循环里可挑选的一个工具。
+              </p>
+              <p>
+                本工厂里两个模型 id 已经从
+                <code>ModelTiers.*</code> 读取：DataAnalyst 用
+                <code>ModelTiers.Analyst(config)</code>，同工厂里的压缩摘要器用
+                <code>ModelTiers.Light(config)</code>，所以 Testing
+                覆盖会触达它们，这里无需改动。
+              </p>
+              <p class="callout callout--build">
+                <span class="callout-label">🔧 说明</span>
+                添加到
+                <code>Agents/AgentFactory.cs</code> 中现有的
+                <code>AgentFactory.Create</code> 方法里。整体替换方法体——类头和
+                using 在前面的课里已经就位（6 个
+                using：<code>AiAgent.Middleware</code>、
+                <code>AiAgent.Tools</code>、<code>Anthropic</code>、
+                <code>Microsoft.Agents.AI</code>、
+                <code>Microsoft.Agents.AI.Compaction</code>、
+                <code>Microsoft.Extensions.AI</code>）。新增的
+                <code>AIAgent reportAgent</code> 参数是唯一的签名变化。
+              </p>
+              <p>
+                方法签名新增 <code>reportAgent</code> 参数。方法体先从配置读 API
+                key 并创建 Anthropic 客户端。<code>ModelId</code> 从
+                <code>ModelTiers.Analyst(config)</code> 读取。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Agents/AgentFactory.cs (signature + client)</span
+                  >
+                </div>
+                <pre class="code-block"><code>public static AIAgent Create(
+    IConfiguration config,
+    SchemaTools tools,
+    AnalysisTools analysis,
+    AIAgent reportAgent,
+    ILoggerFactory loggerFactory)
+{
+    var apiKey = config["ANTHROPIC_API_KEY"]
+        ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not set.");
+
+    IAnthropicClient client = new AnthropicClient { ApiKey = apiKey };</code></pre>
+              </div>
+              <p>
+                接着是 options 对象。前七个工具是早先课程里的 SQL
+                和分析工具；第八个是新增的
+                <code>reportAgent.AsAIFunction(...)</code
+                >，把整个报告工作流包成一个名为
+                <code>run_weekly_report</code>
+                的工具，模型按描述匹配时就按名调用它。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Agents/AgentFactory.cs (options + agent-as-tool)</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    var options = new ChatClientAgentOptions
+    {
+        Name = "claudalytics-analyst",
+        Description = "Answers natural-language questions over Claudalytics telemetry in ClickHouse.",
+        ChatOptions = new ChatOptions
+        {
+            ModelId = ModelTiers.Analyst(config),
+            Instructions = Instructions.System,
+            Tools =
+            [
+                AIFunctionFactory.Create(tools.GetSchema),
+                AIFunctionFactory.Create(tools.RunSql),
+                new ApprovalRequiredAIFunction(
+                    AIFunctionFactory.Create(tools.RunUnboundedSql)),
+                AIFunctionFactory.Create(tools.ListProjects),
+                AIFunctionFactory.Create(tools.ListRecentSessions),
+                AIFunctionFactory.Create(analysis.CostBreakdown),
+                AIFunctionFactory.Create(analysis.SessionDeepDive),
+                reportAgent.AsAIFunction(new AIFunctionFactoryOptions
+                {
+                    Name = "run_weekly_report",
+                    Description = "Runs the full multi-agent weekly telemetry report " +
+                                  "(cost + security + tooling analysts, then a summarizer). " +
+                                  "Expensive — only when the user asks for the weekly report. " +
+                                  "Input: the time window, e.g. 'the last 7 days'.",
+                }),
+            ],
+        },
+    };</code></pre>
+              </div>
+              <p>
+                最后一块构建智能体。<code>ToolCallLoggingChatClient</code>
+                中间件和 OpenTelemetry 构建器与早先课程一致，方法返回完成的
+                <code>AIAgent</code>。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Agents/AgentFactory.cs (build + return)</span
+                  >
+                </div>
+                <pre class="code-block"><code>    var agent = client.AsAIAgent(
+        options,
+        clientFactory: inner =&gt; new ToolCallLoggingChatClient(
+            inner, loggerFactory.CreateLogger&lt;ToolCallLoggingChatClient&gt;()),
+        loggerFactory: loggerFactory);
+
+    return agent.AsBuilder()
+        .UseOpenTelemetry(OtelSourceName)
+        .Build();
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>注入报告智能体并更新 DI 注册</h3>
+              <p>
+                <code>AgentFactory.Create</code> 新增的
+                <code>reportAgent</code> 参数在构建时由 DI 提供。<code
+                  >Program.cs</code
+                >
+                里报告 <code>AIAgent</code> 已注册为键
+                <code>"report"</code> 的带键单例（来自
+                <a href="../lesson11/index.html">D1</a>），DataAnalyst 注册用
+                <code>GetRequiredKeyedService&lt;AIAgent&gt;("report")</code>
+                读回并传入工厂。路由器、洞察智能体和报告工作流的注册已经用
+                <code>ModelTiers.*</code> 读取模型 id，自动流经配置并拾取
+                Testing 覆盖。
+              </p>
+              <p>
+                两处注册都放在 <code>var app = builder.Build()</code> 之前。带键
+                <code>"report"</code> 单例<strong>必须在</strong> DataAnalyst
+                单例之前注册，因为 DataAnalyst
+                工厂在构建时就解析这个键，键必须已存在。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs (DI wiring excerpt — before var app =
+                    builder.Build())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddKeyedSingleton&lt;AIAgent&gt;("report", (sp, _) =&gt; ReportWorkflow.Create(
+    sp.GetRequiredService&lt;IConfiguration&gt;(),
+    sp.GetRequiredService&lt;SchemaTools&gt;(),
+    sp.GetRequiredService&lt;AnalysisTools&gt;()));
+
+builder.Services.AddSingleton&lt;AIAgent&gt;(sp =&gt; AgentFactory.Create(
+    sp.GetRequiredService&lt;IConfiguration&gt;(),
+    sp.GetRequiredService&lt;SchemaTools&gt;(),
+    sp.GetRequiredService&lt;AnalysisTools&gt;(),
+    sp.GetRequiredKeyedService&lt;AIAgent&gt;("report"),
+    sp.GetRequiredService&lt;ILoggerFactory&gt;()));</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>给子智能体工具加上一段护栏描述</h3>
+              <p>
+                你传给
+                <code>AsAIFunction</code>
+                的描述，是外层模型决定何时调用这个工具的唯一信号。两条规则：精确说明它做什么，并加上一条明确的成本警告，免得模型在随口一问的问题上也去伸手调它。你用的是：
+              </p>
+              <blockquote>
+                "Expensive — only when the user asks for the weekly report."
+              </blockquote>
+              <p>
+                没有这句话，LLM
+                会对任何沾上成本或工具的问题都去调用这个多智能体工作流（workflow）——在一个本该
+                Haiku 层级就能澄清的问题上，烧掉 Analyst 层级的额度。
+              </p>
+            </li>
+          </ol>
+
+          <h2>模型分级与 Testing 覆盖</h2>
+          <p>
+            本项目里每个模型 id 都已经从 <code>ModelTiers</code> 读取——在
+            <a href="../lesson01/index.html">A1</a> 引入，并自
+            <a href="../lesson11/index.html">D1</a>、
+            <a href="../lesson12/index.html">D2</a> 起一直使用。
+            <code>AgentFactory.cs</code> 里 DataAnalyst 用
+            <code>ModelTiers.Analyst(config)</code>、压缩摘要器用
+            <code>ModelTiers.Light(config)</code>；<code>Router.cs</code> 用
+            <code>ModelTiers.Light(config)</code>；<code
+              >ReportWorkflow.cs</code
+            >
+            里分析师用 <code>ModelTiers.Analyst(config)</code>、汇总器用
+            <code>ModelTiers.Reasoning(config)</code>。
+          </p>
+          <p>
+            因为选择集中在一个辅助方法里，一次配置改动就触达所有智能体。
+            <code>appsettings.Testing.json</code> 把三个层级都设为 Haiku，于是
+            <code>dotnet run -- --environment Testing</code>
+            让每个智能体都跑得便宜，无需改代码。调用点上的字面量模型字符串对这个覆盖是不可见的：Testing
+            文件设置的是
+            <code>Models:Light</code>、<code>Models:Analyst</code>、
+            <code>Models:Reasoning</code
+            >，而不是一个个字面量。这正是把选择集中到
+            <code>ModelTiers</code> 的原因。
+          </p>
+
+          <h2>为什么用 AsAIFunction，而不是 D2 的路由器派发</h2>
+          <p>
+            <a href="../lesson12/index.html">D2</a>
+            用代码派发：路由器（router）返回一个带类型的
+            <code>RouteDecision</code>，再由一个
+            <code>switch</code> 语句挑选处理器。本课的
+            <code>AsAIFunction</code>
+            用模型派发：外层智能体读取工具描述，在它自己的工具调用（tool
+            call）循环中决定是否以及何时调用子智能体。这两种机制是互补的：
+          </p>
+          <ul>
+            <li>
+              <strong>代码选择（路由器（router））</strong
+              >：确定、可审计，适合在构建时目录已知的能力菜单。
+            </li>
+            <li>
+              <strong>LLM 选择（AsAIFunction）</strong
+              >：灵活的对话中组合——模型可以在一轮内把子智能体与其他工具串联起来、给它传入一段算出来的提示，或基于代码级路由器看不到的上下文跳过它。
+            </li>
+          </ul>
+          <p>
+            两者并存：路由器（router）派发<em>到</em> DataAnalyst
+            会话（session），而在那个会话内部，DataAnalyst 又能通过
+            <code>run_weekly_report</code>
+            调用报告工作流（workflow）——两层，两种不同的派发机制。
+          </p>
+
+          <h2>验证</h2>
+          <div class="gate">
+            <p class="gate-title">✅ 关卡（gate） — 未变绿前不要前进</p>
+            <h3>
+              检查 1 — 智能体（agent）即工具（tool）在 chat 流上触发（Haiku）
+            </h3>
+            <p>
+              从 Testing 环境开始（<code
+                >dotnet run -- --environment Testing</code
+              >）。用一段引导性提示 POST 到 <code>/chat/stream</code>：
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -N -X POST http://localhost:8124/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"message": "please run the weekly report for the last 7 days"}'</code></pre>
+            </div>
+            <p>
+              你必须在流中看到一个
+              <code>name: "run_weekly_report"</code> 的
+              <code>tool_call</code> SSE 事件，随后是一个包含报告叙述的
+              <code>token</code> 事件，然后是 <code>done</code>。
+            </p>
+            <h3>检查 2 — 分级（model tiering）（那一次真实层级检查）</h3>
+            <p><strong>不带</strong> Testing 覆盖只跑一轮：</p>
+            <div class="codewrap">
+              <pre class="code-block"><code>dotnet run</code></pre>
+            </div>
+            <p>
+              向 <code>/chat</code>（路由器（router）那一轮）POST 一条消息，再向
+              <code>/report</code>（摘要器那一轮）POST 一条。然后查询你的 OTel
+              traces 表——两种 span 类型都必须存在，且它们的
+              <code>model_id</code> 属性必须不同：
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>-- In ClickHouse (or your OTel viewer)
+SELECT
+    SpanAttributes['gen_ai.request.model'] AS model_id,
+    count() AS spans
+FROM otel_traces
+WHERE ServiceName = 'claudalytics-agent'
+  AND Timestamp &gt; now() - INTERVAL 5 MINUTE
+GROUP BY model_id;</code></pre>
+            </div>
+            <p>
+              你应该至少看到两个不同的模型 id——Light 层级的路由器（router）和
+              Analyst/Reasoning 层级的摘要器。
+              <strong>检查完后立即切回 Testing</strong>。
+            </p>
+            <h3>反向测试</h3>
+            <p>
+              回到 Testing，POST 一个不提及每周报告的数据问题："which project
+              spent the most last week?" 流中绝不能包含一个名为
+              <code>run_weekly_report</code> 的
+              <code>tool_call</code> 事件。如果真实层级检查里出现了相同的模型
+              id，说明配置没有流通——确认这次检查没有传
+              <code>--environment Testing</code>，<code>appsettings.json</code>
+              里是真实（非 Haiku）的
+              <code>Models</code> 值，并且每一处智能体调用点都用
+              <code>ModelTiers.*</code> 而不是字符串字面量。
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ 常见坑</span>
+            <ul>
+              <li>
+                <strong>子智能体在随口问的问题上被调用</strong> → 描述太含糊。在
+                <code>AsAIFunction</code> 描述里加上 "Expensive — only when the
+                user explicitly asks for the weekly report"。
+              </li>
+              <li>
+                <strong>分层检查里模型 id 相同</strong> →
+                某个调用点留着字面量模型字符串，而不是
+                <code>ModelTiers.*</code> 调用。在所有
+                <code>.cs</code> 文件里搜索 <code>"claude-</code>；
+                <code>ModelTiers.cs</code> 之外的每一处命中都要改掉。
+              </li>
+              <li>
+                <strong>Testing 覆盖没有效果</strong> → 检查
+                <code>--</code> 分隔符和环境名；完整细节见
+                <a href="../lesson00/index.html">L0</a>。
+              </li>
+              <li>
+                <strong>报告智能体的带键服务没被解析出来</strong> → DataAnalyst
+                工厂收到的 <code>reportAgent</code> 是 <code>null</code>。在构建
+                DataAnalyst 时确保用的是
+                <code>GetRequiredKeyedService&lt;AIAgent&gt;("report")</code
+                >——而不是 <code>GetRequiredService&lt;AIAgent&gt;</code>。
+              </li>
+              <li>
+                <strong>内层智能体复用了外层会话（session）</strong> → 通过
+                <code>AsAIFunction</code>
+                调用时，子智能体每次调用都跑一个全新的临时会话（不传任何 session
+                参数）。这是对的。不要把外层智能体的
+                <code>AgentSession</code> 传进子智能体的工具选项里。
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              标记本课完成
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

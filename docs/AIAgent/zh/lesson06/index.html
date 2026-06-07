@@ -1,0 +1,762 @@
+<!doctype html>
+<!-- lesson06/index.html — B3 · An agent is just a node -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>B3 · 智能体不过是一个节点 — MAF 课程</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="06">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">课程</a> / 模块 B / B3
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">第 06 课 · B3 · 模块 B — 图</p>
+            <h1>智能体（agent）不过是一个节点（node）</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★</span>
+              <span class="badge badge--cost">Haiku</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>你将学到什么</h2>
+          <p>
+            现在 Claudalytics Copilot 调查只会丢出原始 probe 行。有人问“这意味着
+            什么？”，流水线答不上来，因为没有任何东西把数字转成文字。本课把一个
+            LLM agent 作为一个 node 放进图里，它读取带类型的 probe
+            数据并写出一份短报告。 于是这次运行最终给出人能读的 prose。
+          </p>
+          <p>
+            心智模型很简单——<strong>agent 不过是一个 node</strong>。你继承
+            <code>Executor&lt;T&gt;</code>，接收带类型输入，调用
+            <code>agent.RunAsync</code>，再产出结果。
+            <a href="../lesson05/index.html">B2</a>
+            的图拓扑与事件流不变，只有最后一个 node 变聪明。
+          </p>
+          <p>
+            为此你会加入三个消息记录（<code>Findings</code>、
+            <code>DeepDiveRequest</code
+            >、<code>DeepDiveDecision</code>）、一个做 fan-in 的
+            <code>ValidatorExecutor</code> 和一个持有 agent 的
+            <code>SynthesisExecutor</code>，并创建
+            <code>InvestigationWorkflow.cs</code> 作为图的
+            <code>Build</code> 方法的正式归宿，退役 B1 的脚手架文件
+            <code>ProbeWorkflow.cs</code> 和 <code>CollectorExecutor</code>。
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 讲解</span>
+            <p>
+              MAF
+              的<strong>智能光谱</strong>：每个工作流（workflow）节点（node）都处于
+              “纯确定性代码”（免费、瞬时）与“完整 LLM
+              智能体（agent）”（灵活、昂贵）之间。 你来决定每一步配多少智能。SQL
+              探针（probe）一点都不需要；
+              而综合步骤恰好需要足够的智能，把表格化的数字转写成连贯的文字。
+            </p>
+            <p>本课引入的 API 接口：</p>
+            <ul>
+              <li>
+                <code>Executor&lt;TInput&gt;</code> —— 基类不变；
+                通过构造函数注入智能体（DI 的用法和任何服务一模一样）。
+              </li>
+              <li>
+                <code>[YieldsOutput(typeof(T))]</code> —— 终端节点（node）
+                声明；框架在运行时会拒绝未声明的产出类型，因此该特性是必需的。
+              </li>
+              <li>
+                <code>context.YieldOutputAsync(value, ct)</code> —— 把
+                最终值推送到工作流输出流并结束本次运行。
+              </li>
+              <li>
+                <code>agent.RunAsync(prompt, ct)</code> —— 单轮 LLM 调用， 返回
+                <code>.Text</code>。这里要用一个专门的
+                <em>写作智能体（writer agent）</em>，而不是主分析师；它绝不能
+                反问追加问题（见下方的提示词契约）。
+              </li>
+            </ul>
+            <p>
+              <strong>工作流（workflow）内智能体（agent）的提示词契约</strong
+              >：模型的
+              第一次回复就是工作流的输出。没有任何渠道能让追加的问题得到回答。系统
+              指令必须包含：
+              <em>“你的回复就是最终成品。不要提问，也不要索取更多数据。”</em>
+            </p>
+          </div>
+
+          <h2>本课之后的流水线形态</h2>
+          <div class="codewrap">
+            <pre class="code-block"><code>PlanExecutor
+    │  (3× ProbeJob)
+    ▼  fan-out
+ProbeExecutor × 3
+    │  (3× ProbeResult)
+    ▼  fan-in barrier
+ValidatorExecutor        ← NEW: deterministic; builds Findings; routes spike branch
+    │  (Findings)             (DeepDiveRequest goes to deepDive directly — no human gate in B3)
+    ▼
+SynthesisExecutor        ← NEW: holds AIAgent → markdown report
+    │  [YieldsOutput]
+    ▼  workflow output: string</code></pre>
+          </div>
+
+          <h2>动手实现</h2>
+          <ol class="steps">
+            <li>
+              <h3>在 <code>InvestigationModels.cs</code> 中定义新的消息记录</h3>
+              <p>
+                图需要带类型的消息在 node 之间传递。<code>Findings</code> 由
+                validator 构建，由 synthesis node 读取。<code
+                  >DeepDiveRequest</code
+                >
+                和 <code>DeepDiveDecision</code> 属于 cost-spike
+                分支。把这三个记录追加到
+                <code>Workflows/InvestigationModels.cs</code>（B1 已建立，含
+                <code>InvestigationRequest</code>、<code>ProbeJob</code>、
+                <code>ProbeResult</code>）。无需新增 using。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationModels.cs — 追加在 ProbeResult
+                    之后</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>/// &lt;summary&gt;Aggregated, validated probe results.&lt;/summary&gt;
+public sealed record Findings(int Days, List&lt;ProbeResult&gt; Results, bool CostSpike, List&lt;string&gt; ValidationNotes);
+
+/// &lt;summary&gt;Deep-dive branch request, sent by the validator on a cost spike.&lt;/summary&gt;
+public sealed record DeepDiveRequest(string Reason);
+
+/// &lt;summary&gt;Deep-dive branch decision, returned by the approval port in F2.&lt;/summary&gt;
+public sealed record DeepDiveDecision(bool Approve);
+</code></pre>
+              </div>
+              <p>
+                在这里引入后两个记录，是因为 validator 的
+                <code>[SendsMessage]</code> 特性和
+                <code>DeepDiveExecutor</code> 桩（第 3
+                步）会引用它们。把请求交给人并等待决定的 human-in-the-loop
+                approval PORT 在
+                <a href="../lesson17/index.html">F2</a> 中加入。
+              </p>
+            </li>
+
+            <li>
+              <h3>为写作智能体（writer agent）加入系统指令</h3>
+              <p>
+                synthesis node 需要一个 agent 可调用。这个 agent 是
+                writer，不是主 分析师。它只接收结构化数据并返回 markdown
+                文字。在
+                <code>Agents/Instructions.cs</code> 的
+                <code>Instructions</code> 类里、<code>System</code>
+                常量之后加入一个 <code>Writer</code> 常量。usings 和 namespace
+                在 <a href="../lesson01/index.html">A1</a>
+                中已就绪。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Agents/Instructions.cs — Instructions 类内</span
+                  >
+                </div>
+                <pre class="code-block"><code>public const string Writer = """
+    You are a technical writer for an observability report.
+    You receive structured probe data (TSV) and validation notes.
+    Write a short markdown investigation report: headline numbers,
+    then findings, then 1-3 recommendations.
+    Use ONLY the numbers present in the data — do not invent figures.
+    If data is thin, say so honestly.
+    Your response is the final product. Do not ask questions or request more data.
+    """;
+</code></pre>
+              </div>
+              <p>
+                最后一句是提示词契约。模型的第一次回复就是工作流的输出，没有渠道能让
+                追加问题得到回答，所以 agent 绝不能反问。
+              </p>
+            </li>
+
+            <li>
+              <h3>
+                把 <code>ValidatorExecutor</code>、
+                <code>DeepDiveExecutor</code> 桩和
+                <code>SynthesisExecutor</code> 加入
+                <code>InvestigationExecutors.cs</code>
+              </h3>
+              <p>
+                把这三个执行器（executor）全部追加到
+                <code>Workflows/InvestigationExecutors.cs</code>。该文件顶部的
+                using 已经包含 来自 <a href="../lesson04/index.html">B1</a> 的
+                <code>using Microsoft.Agents.AI;</code> 和
+                <code>using Microsoft.Agents.AI.Workflows;</code>。
+                顺序对讲解很重要：先 Validator（扇入（fan-in）逻辑），再
+                DeepDive 桩（尖峰分支的占位）， 最后 Synthesis（LLM
+                节点（node））。
+              </p>
+
+              <h4>ValidatorExecutor —— 确定性 fan-in</h4>
+              <p>
+                validator 位于 fan-in barrier 之后。它收集全部三条
+                <code>ProbeResult</code>，检查每条，构建出 synthesis node
+                接着读取的 <code>Findings</code> 记录。B3 里还没有 cost-spike
+                检查，所以 <code>CostSpike</code> 恒为 <code>false</code>，<code
+                  >Days</code
+                >
+                是占位 的 0；B4（L07）会通过 context state
+                接入真实值并加入尖峰检测。字段上的 <code>⚠</code> 标记一个
+                bug：它在 checkpoint/resume 时会丢，
+                <a href="../lesson07/index.html">B4</a> 会讲。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs — 追加</span
+                  >
+                </div>
+                <pre class="code-block"><code>[SendsMessage(typeof(Findings))]
+[SendsMessage(typeof(DeepDiveRequest))]
+public sealed class ValidatorExecutor() : Executor&lt;ProbeResult&gt;("validator")
+{
+    private const int ExpectedProbes = 3;
+    private readonly List&lt;ProbeResult&gt; _accumulated = []; // ⚠ B4 shows why this field breaks on resume
+
+    public override async ValueTask HandleAsync(
+        ProbeResult result, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        _accumulated.Add(result);
+        if (_accumulated.Count &lt; ExpectedProbes) return;
+
+        var notes = _accumulated
+            .Where(probe =&gt; !probe.HasData)
+            .Select(probe =&gt; $"Probe '{probe.Name}' returned no usable numbers — finding rejected, not interpreted.")
+            .ToList();
+
+        var findings = new Findings(
+            Days: 0,
+            Results: [.._accumulated],
+            CostSpike: false,
+            ValidationNotes: notes);
+
+        await context.AddEventAsync(
+            new InvestigationProgressEvent("Validation complete — forwarding findings."), cancellationToken);
+
+        await context.SendMessageAsync(findings, cancellationToken: cancellationToken);
+    }
+}
+</code></pre>
+              </div>
+              <p>
+                即便 B3 从不发送它，<code
+                  >[SendsMessage(typeof(DeepDiveRequest))]</code
+                >
+                也要声明。builder 在 <code>Build()</code> 时校验所有
+                edge，现在声明该类型， 第 4 步加入的深挖 edge 才会被无错接受。
+              </p>
+
+              <h4>DeepDiveExecutor —— 尖峰分支的桩</h4>
+              <p>
+                第 4 步把它接入图，让 builder 能校验已声明的
+                <code>[SendsMessage(typeof(DeepDiveRequest))]</code> edge。B3
+                里它是桩： 从共享 state 读取
+                findings（缺失时兜底为空记录），原样转发给 synthesis
+                node。完整主体在
+                <a href="../lesson17/index.html">F2</a> 中加入。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs — 追加</span
+                  >
+                </div>
+                <pre class="code-block"><code>[SendsMessage(typeof(Findings))]
+public sealed class DeepDiveExecutor() : Executor&lt;DeepDiveDecision&gt;("deepdive")
+{
+    public override async ValueTask HandleAsync(
+        DeepDiveDecision decision, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        var findings = await context.ReadStateAsync&lt;Findings&gt;(
+            "findings", scopeName: "investigation", cancellationToken)
+            ?? new Findings(0, [], false, ["Findings state was missing."]);
+
+        await context.AddEventAsync(
+            new InvestigationProgressEvent("Deep-dive stub — forwarding findings."), cancellationToken);
+
+        await context.SendMessageAsync(findings, cancellationToken: cancellationToken);
+    }
+}
+</code></pre>
+              </div>
+
+              <h4>SynthesisExecutor —— agent node</h4>
+              <p>
+                synthesis executor 是图中唯一的 LLM node，读取 validator 发来的
+                <code>Findings</code>。结构和其他 executor 一样：继承
+                <code>Executor&lt;T&gt;</code>，实现
+                <code>HandleAsync</code>。区别在主体 调用
+                <code>writer.RunAsync</code>。前半部分把带类型的
+                <code>Findings</code> 转成 agent 能读的纯文本。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs — 追加</span
+                  >
+                </div>
+                <pre class="code-block"><code>[YieldsOutput(typeof(string))]
+public sealed class SynthesisExecutor(AIAgent writer) : Executor&lt;Findings&gt;("synthesis")
+{
+    public override async ValueTask HandleAsync(
+        Findings findings, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        await context.AddEventAsync(
+            new InvestigationProgressEvent("Synthesizing the report."), cancellationToken);
+
+        var probesText = string.Join("\n\n",
+            findings.Results.Select(probe =&gt; $"## {probe.Name}\n{probe.Rows}"));
+        var notesText = findings.ValidationNotes.Count == 0
+            ? "(none)"
+            : string.Join("\n", findings.ValidationNotes);
+</code></pre>
+              </div>
+              <p>
+                后半部分用一个 prompt 调用 writer agent，prompt 带上 probe
+                文本、notes 和天数。agent 返回 markdown，<code
+                  >YieldOutputAsync</code
+                >
+                把它作为工作流 的最终输出推出去。在此块之后收尾方法和类。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs — 同一方法</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>        var response = await writer.RunAsync($"""
+            Write a short markdown investigation report over the last {findings.Days} days of
+            Claude Code telemetry. Cost spike detected: {findings.CostSpike}.
+
+            Probe data (TSV):
+            {probesText}
+
+            Validator notes (mention them honestly):
+            {notesText}
+
+            Shape: headline numbers, findings, then 1-3 recommendations. Use only the
+            numbers in the data above.
+            """, cancellationToken: cancellationToken);
+
+        await context.YieldOutputAsync(response.Text, cancellationToken);
+    }
+}
+</code></pre>
+              </div>
+              <p>
+                <code>[YieldsOutput(typeof(string))]</code>
+                是必需的。没有它，框架会抛出 运行时错误，点名该 executor
+                和未声明的类型。
+              </p>
+            </li>
+
+            <li>
+              <h3>
+                在
+                <code>InvestigationWorkflow.Build()</code>
+                中内联构造写作智能体（writer agent）
+              </h3>
+              <p>
+                synthesis node 需要把 writer agent
+                传进去。<strong>不要</strong>把它注册 到 DI：注册成
+                <code>AddSingleton&lt;AIAgent&gt;</code> 会和同类型的主分析师
+                冲突，DI 会注入最后注册的那个。正确做法是在
+                <code>InvestigationWorkflow.Build()</code>
+                内部内联构造，这正是本项目的做法。 无需新增 NuGet 包，依赖都在
+                <a href="../lesson01/index.html">A1</a> 中加过。 放在解析
+                <code>apiKey</code> 并创建 <code>client</code> 之后。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationWorkflow.cs — Build() 内</span
+                  >
+                </div>
+                <pre class="code-block"><code>var writer = client.AsAIAgent(
+    model: ModelTiers.Analyst(config),
+    instructions: Instructions.Writer,
+    name: "InvestigationWriter");
+</code></pre>
+              </div>
+              <p>
+                <code>client.AsAIAgent(model:, instructions:, name:)</code> 是
+                三参数重载。传入
+                <code>instructions:</code> 即可设置系统提示词（system
+                prompt），无需 <code>ChatClientAgentOptions</code> 包装对象——
+                你正是用的这种形式。
+              </p>
+            </li>
+
+            <li>
+              <h3>
+                创建 <code>Workflows/InvestigationWorkflow.cs</code>，包含
+                完整的 B3 图
+              </h3>
+              <p>
+                这是
+                <code>InvestigationWorkflow.Build</code>
+                方法的正式归宿，创建为新文件， 替换掉 B1 的脚手架
+                <code>ProbeWorkflow.cs</code>。前半部分写文件头、writer
+                agent，以及每个 node 各一个实例（就是前几步写的那些）。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationWorkflow.cs</span
+                  >
+                  <span class="tag tag--new">新文件</span>
+                </div>
+                <pre class="code-block"><code>using AiAgent.Agents;
+using AiAgent.Tools;
+using Anthropic;
+using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Workflows;
+
+namespace AiAgent.Workflows;
+
+/// &lt;summary&gt;The investigation graph (B3 form). No human-approval port yet; that is added in F2.&lt;/summary&gt;
+public static class InvestigationWorkflow
+{
+    public static Workflow Build(IConfiguration config, ClickHouseClient clickHouse)
+    {
+        var apiKey = config["ANTHROPIC_API_KEY"]
+            ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not set.");
+
+        IAnthropicClient client = new AnthropicClient { ApiKey = apiKey };
+        var writer = client.AsAIAgent(
+            model: ModelTiers.Analyst(config),
+            instructions: Instructions.Writer,
+            name: "InvestigationWriter");
+
+        var plan = new PlanExecutor();
+        ProbeExecutor[] probes =
+        [
+            new("probe-0", clickHouse),
+            new("probe-1", clickHouse),
+            new("probe-2", clickHouse),
+        ];
+        var validator = new ValidatorExecutor();
+        var deepDive = new DeepDiveExecutor();
+        var synthesis = new SynthesisExecutor(writer);
+
+        var builder = new WorkflowBuilder(plan);
+</code></pre>
+              </div>
+              <p>
+                后半部分接线。fan-out edge 把每个 <code>ProbeJob</code> 从 plan
+                路由到一个 probe；fan-in barrier 等三个 probe 都到齐才放行
+                validator；正常路径把 <code>Findings</code> 从 validator 送到
+                synthesis node。最后两条是 spike 分支：validator 把
+                <code>DeepDiveRequest</code> 发给桩，桩再把 findings 转 给
+                synthesis。B3 从不触发，但两条 edge 现在都要声明，builder 才会在
+                <code>Build()</code> 时接受 validator 的
+                <code>[SendsMessage(typeof(DeepDiveRequest))]</code
+                >。这条分支还没有 human gate，审批 port 在
+                <a href="../lesson17/index.html">F2</a> 中加入。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationWorkflow.cs — 同一方法</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>        builder.AddFanOutEdge&lt;ProbeJob&gt;(plan, probes.Select(p =&gt; (ExecutorBinding)p),
+            (job, targetCount) =&gt; [(job?.Slot ?? 0) % targetCount]);
+
+        builder.AddFanInBarrierEdge(probes.Select(p =&gt; (ExecutorBinding)p), validator);
+
+        builder.AddEdge&lt;Findings&gt;(validator, synthesis, _ =&gt; true);
+
+        builder.AddEdge&lt;DeepDiveRequest&gt;(validator, deepDive, _ =&gt; true);
+        builder.AddEdge(deepDive, synthesis);
+
+        return builder.WithOutputFrom(synthesis).Build();
+    }
+}
+</code></pre>
+              </div>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 清理 B1 脚手架</span>
+                <p>
+                  既然 <code>InvestigationWorkflow.cs</code> 已经掌管了这张图，
+                  有两件 B1 留下的产物已被取代：
+                </p>
+                <ul>
+                  <li>
+                    <strong
+                      >删除 <code>Workflows/ProbeWorkflow.cs</code></strong
+                    >
+                    —— 那个用完即弃的 B1 包装类。它已被
+                    <code>InvestigationWorkflow.cs</code> 替换。
+                  </li>
+                  <li>
+                    <strong
+                      >从
+                      <code>Workflows/InvestigationExecutors.cs</code> 中删除
+                      <code>CollectorExecutor</code></strong
+                    >
+                    —— 来自 B1 的朴素拼接执行器（executor），现在已被
+                    <code>ValidatorExecutor</code> +
+                    <code>SynthesisExecutor</code> 取代。下方的 v1 vs v2 小节
+                    会清楚展示它原本的内容。
+                  </li>
+                </ul>
+              </div>
+            </li>
+
+            <li>
+              <h3>在 <code>Program.cs</code> 中重新指向服务工厂</h3>
+              <p>
+                在 <a href="../lesson05/index.html">B2</a> 中注册的
+                <code>InvestigationService</code> 使用的工厂仍然构建旧的
+                <code>ProbeWorkflow</code>。把它改为构建新图——这是一行改动：
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs</span>
+                </div>
+                <pre class="code-block"><code>// Before (B2 — ProbeWorkflow):
+builder.Services.AddSingleton(sp =&gt;
+    new InvestigationService(() =&gt; ProbeWorkflow.Build(sp.GetRequiredService&lt;ClickHouseClient&gt;()), sp.GetRequiredService&lt;ILogger&lt;InvestigationService&gt;&gt;()));
+
+// After (B3 — InvestigationWorkflow):
+builder.Services.AddSingleton(sp =&gt;
+    new InvestigationService(() =&gt; InvestigationWorkflow.Build(sp.GetRequiredService&lt;IConfiguration&gt;(), sp.GetRequiredService&lt;ClickHouseClient&gt;()), sp.GetRequiredService&lt;ILogger&lt;InvestigationService&gt;&gt;()));
+</code></pre>
+              </div>
+              <p>
+                工厂现在还从 provider 解析 <code>config</code>，<code
+                  >Build</code
+                >
+                需要它 读取 <code>ANTHROPIC_API_KEY</code> 和
+                <code>ModelTiers</code>。返回的工作流 会经过真正的 validator 和
+                synthesis node，而不再是朴素的 collector。
+              </p>
+            </li>
+          </ol>
+
+          <div class="callout callout--evolution">
+            <span class="callout-label">🔄 演进线索</span>
+            <p>
+              本课完成<strong>线索 1</strong>：B1 collector → B3 synthesis
+              node。朴素 collector 拼接原始 TSV 并返回，足以证明 fan-in
+              可行。但只要有人问“这意味着 什么？”流水线就答不上来。synthesis
+              node 就是修复方案。下方 v1 vs v2 展示改了 什么。
+            </p>
+          </div>
+
+          <h2>v1 vs v2</h2>
+
+          <div class="tabs">
+            <div class="tab-bar">
+              <button class="tab-btn active">v1 — 朴素收集器（B1）</button>
+              <button class="tab-btn">v2 — 综合节点（B3）</button>
+            </div>
+
+            <div class="tab-panel active">
+              <p>v1 收集器只是用来暴露问题——你不会把它发布上线。 终态如下：</p>
+              <div class="codewrap">
+                <pre
+                  class="code-block"
+                ><code>// v1 — naive concatenating collector — do not ship
+[YieldsOutput(typeof(string))]
+public sealed class CollectorExecutor() : Executor&lt;ProbeResult&gt;("collector")
+{
+    private readonly List&lt;string&gt; _accumulated = [];  // ⚠ breaks on checkpoint/resume (B4)
+
+    public override async ValueTask HandleAsync(
+        ProbeResult result, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        _accumulated.Add($"## {result.Name}\n{result.Rows}");
+        if (_accumulated.Count &lt; 3) return;
+
+        // Concatenate and emit — no intelligence.
+        await context.YieldOutputAsync(string.Join("\n\n", _accumulated), cancellationToken);
+    }
+}
+</code></pre>
+              </div>
+              <p>
+                <strong>它为什么崩溃：</strong>输出是原始 TSV——没有
+                解读、没有建议，人无法使用。实例字段
+                <code>_accumulated</code>
+                在检查点（checkpoint）/恢复（resume）时也会出问题（这是
+                <a href="../lesson07/index.html">B4</a> 的主题）。
+              </p>
+            </div>
+
+            <div class="tab-panel">
+              <p>
+                v2 综合节点（node）从 <code>ValidatorExecutor</code> 接收一个
+                组装好的 <code>Findings</code> 记录——一条消息、一次 LLM
+                调用、一次 产出。没有实例字段；累加是在验证器里通过
+                <code>context.ReadOrInitStateAsync</code>
+                以检查点（checkpoint）安全的方式完成的 （在 B4 中加入）。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs</span
+                  >
+                </div>
+                <pre class="code-block"><code>[YieldsOutput(typeof(string))]
+public sealed class SynthesisExecutor(AIAgent writer) : Executor&lt;Findings&gt;("synthesis")
+{
+    public override async ValueTask HandleAsync(
+        Findings findings, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        var probesText = string.Join("\n\n",
+            findings.Results.Select(probe =&gt; $"## {probe.Name}\n{probe.Rows}"));
+
+        var response = await writer.RunAsync($"""
+            Write a short markdown investigation report over the last {findings.Days} days ...
+            Probe data (TSV): {probesText}
+            Use only the numbers in the data above.
+            """, cancellationToken: cancellationToken);
+
+        await context.YieldOutputAsync(response.Text, cancellationToken);
+    }
+}
+</code></pre>
+              </div>
+            </div>
+          </div>
+
+          <h2>验证</h2>
+          <div class="gate">
+            <p class="gate-title">✅ 关卡 — 未变绿前不要前进</p>
+
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>dotnet run -- --environment Testing</code></pre>
+            </div>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/investigate \
+  -H "Content-Type: application/json" \
+  -d '{"days": 7}'</code></pre>
+            </div>
+
+            <p><strong>以下三点必须全部成立：</strong></p>
+            <ol>
+              <li>
+                响应体是<strong>散文式 markdown</strong>——有标题、
+                句子、数字。而不是一坨原始 TSV。
+              </li>
+              <li>
+                报告里的数字与探针数据完全一致。如果
+                <code>cost-trend</code> 显示成本最高的一天是 <code>0.12</code>，
+                报告就必须说 <code>0.12</code>——不能是 凭空捏造的数字。
+              </li>
+              <li>
+                来自 B2 驱动器的事件时间线显示出同样的图
+                形态：探针（probe）执行器（executor）处于一个超步（superstep），验证器其次，
+                综合节点（node）最后。加入一个智能体（agent）节点并不会改变拓扑。
+              </li>
+            </ol>
+
+            <p>
+              <strong>反向测试：</strong>把探针（probe）数据从
+              综合提示词中移除（传入一个空的 <code>probesText</code>）并
+              重新运行。模型会产出一份听起来煞有介事、但数字是编造的报告——它
+              照样能成功完成。这就是幻觉基线。如果你接地（grounded）和
+              不接地（ungrounded）的两份报告看起来一模一样，说明提示词没有把模型
+              约束到数据上——把指令收紧一些。前进之前记得把探针数据放回去。
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ 常见坑</span>
+            <ul>
+              <li>
+                <strong
+                  >工作流（workflow）输出是一个问题，而不是一份报告</strong
+                >
+                → 写作智能体（writer agent）的指令缺了提示词契约那句话。补上：
+                <em>“你的回复就是最终成品。不要提问，也不要索取 更多数据。”</em>
+              </li>
+              <li>
+                <strong
+                  >点名 <code>SynthesisExecutor</code> 和
+                  <code>string</code> 的运行时错误</strong
+                >
+                → 类上缺了
+                <code>[YieldsOutput(typeof(string))]</code> 特性。
+              </li>
+              <li>
+                <strong>报告里的数字和探针（probe）对不上</strong> →
+                综合节点（node）运行时 <code>findings.Results</code> 是空的。
+                验证器没有填充 <code>Findings</code> 记录—— 在
+                <code>ValidatorExecutor</code> 里加一个调试事件，记录 结果数量。
+              </li>
+              <li>
+                <strong
+                  >注入到
+                  <code>SynthesisExecutor</code> 的智能体（agent）不对</strong
+                >
+                → 你在 <code>Program.cs</code> 中把写作智能体（writer
+                agent）注册成了 <code>AddSingleton&lt;AIAgent&gt;</code>。DI
+                会解析出最后注册的那个 <code>AIAgent</code>，于是
+                <code>SynthesisExecutor</code> 拿到的是
+                注册顺序竞赛中胜出的那一个。修复办法：在
+                <code>InvestigationWorkflow.Build()</code>
+                中内联构造写作智能体（如 第 4 步所示），并直接传给
+                <code>new SynthesisExecutor(writer)</code>——完全不走 DI 查找。
+              </li>
+              <li>
+                <strong
+                  >构建错误：未声明的边（edge）类型
+                  <code>DeepDiveRequest</code></strong
+                >
+                → <code>ValidatorExecutor</code> 缺了
+                <code>[SendsMessage(typeof(DeepDiveRequest))]</code>，或者
+                <code>InvestigationWorkflow.Build()</code> 里的
+                <code>AddEdge&lt;DeepDiveRequest&gt;(validator, deepDive)</code>
+                调用不见了。即便 B3 中尖峰分支从不触发，这两者也都必须存在。
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              标记本课完成
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

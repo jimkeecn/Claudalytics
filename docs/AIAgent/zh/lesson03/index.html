@@ -1,0 +1,543 @@
+<!doctype html>
+<!-- lesson03/index.html — A3 · Streaming answers (SSE) -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>A3 · 流式返回答案（SSE） — MAF 课程</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="03">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">课程</a> / 模块 A / A3
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">第 03 课 · A3 · 模块 A — Hello agent</p>
+            <h1>流式返回答案（SSE）</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★</span>
+              <span class="badge badge--cost">Haiku</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>你将学到什么</h2>
+          <p>
+            Claudalytics Copilot 用户问“我有哪些项目”时，agent 要跑 ClickHouse
+            查询再写一段答案。现在用户得看着加载圈等整轮结束，才一次性看到全部文字。
+            <strong>流式（Streaming）</strong> 用 <code>RunStreamingAsync</code>
+            运行 agent，在每个 token 产出时立即通过
+            <strong>Server-Sent Events（SSE）</strong> 连接发给客户端。
+          </p>
+          <p>
+            本课新增
+            <code>/chat/stream</code> endpoint，把四种流式更新映射到四种 SSE
+            事件：<code>session</code>、<code>token</code>、<code>tool_call</code>、
+            <code>done</code>。approval
+            处理（<code>approval_request</code>）放到后面的
+            <a href="../lesson10/index.html">C3/第10课</a>，A3 的流不带
+            approval。
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 讲解</span>
+            <h3>流式（streaming）运行与更新流</h3>
+            <p>
+              MAF 的 <code>AIAgent</code> 暴露了两个运行方法。你已经在
+              <a href="../lesson01/index.html">A1</a> 中认识了阻塞式的那个：
+            </p>
+            <ul>
+              <li>
+                <code>RunAsync(message, session)</code> —— 等待整轮完成，
+                返回一个 <code>AgentResponse</code>。
+              </li>
+              <li>
+                <code>RunStreamingAsync(message, session)</code> —— 返回一个
+                <code>IAsyncEnumerable&lt;StreamingChatMessageUpdate&gt;</code
+                >。
+                序列中的每一项都是一次部分更新，在模型产出它的那一刻立即发出。
+              </li>
+            </ul>
+            <p>
+              一个
+              <code>StreamingChatMessageUpdate</code> 携带两样你关心的东西：
+            </p>
+            <ul>
+              <li>
+                <code>update.Text</code> —— 当模型在本次更新中产出了文本 token
+                时， 它是一个非空字符串。这就是你要立即转发的部分单词或短语。
+              </li>
+              <li>
+                <code>update.Contents</code> —— 一个有类型的内容项列表。
+                这里要关注的是 <code>FunctionCallContent</code>（模型选择调用的
+                工具，tool）。还有第二种内容类型
+                <code>ToolApprovalRequestContent</code>，会在后面的
+                <a href="../lesson10/index.html">C3/第10课</a> 中引入，用于那些
+                在执行前需要人工签批的工具；A3 不处理它。
+              </li>
+            </ul>
+            <p>SSE 格式很小：每个事件两行，后面跟一个空行。</p>
+            <div class="codewrap">
+              <pre class="code-block"><code>event: token
+data: {"text":"Hello, "}
+
+event: token
+data: {"text":"world!"}
+
+event: done
+data: {}
+</code></pre>
+            </div>
+            <p>
+              客户端读到每个 <code>event:</code>/<code>data:</code>
+              对就立即反应。 关键是每次写入后都要
+              <strong>flush</strong>：ASP.NET 响应体默认带缓冲， 没有显式
+              <code>FlushAsync</code> 的话，“流”就只是一个很慢的单次响应。
+            </p>
+          </div>
+
+          <h2>四种 SSE 事件类型</h2>
+          <p>
+            你在
+            <code>/chat/stream</code> 上恰好用四个事件名。知道各自由什么
+            触发，更新循环里的判断就很好读。
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>事件</th>
+                <th>何时触发</th>
+                <th>关键负载字段</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>session</code></td>
+                <td>
+                  在流开始之前，仅一次——携带客户端在后续请求中应回传的会话（session）
+                  id。
+                </td>
+                <td><code>sessionId</code></td>
+              </tr>
+              <tr>
+                <td><code>token</code></td>
+                <td>在每次 <code>update.Text</code> 非空的更新时触发。</td>
+                <td><code>text</code></td>
+              </tr>
+              <tr>
+                <td><code>tool_call</code></td>
+                <td>
+                  对 <code>update.Contents</code> 中的每个
+                  <code>FunctionCallContent</code> 触发。
+                </td>
+                <td><code>name</code>、<code>arguments</code></td>
+              </tr>
+              <tr>
+                <td><code>done</code></td>
+                <td>在 <code>await foreach</code> 正常结束之后，仅一次。</td>
+                <td>（空对象）</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            当运行抛出异常时，会在 catch 块中发出一个 <code>error</code> 事件来
+            代替 <code>done</code>。
+          </p>
+
+          <h2>动手实现</h2>
+          <ol class="steps">
+            <li>
+              <h3>添加 SseEvent 辅助方法</h3>
+              <p>
+                每次 SSE 写入都做两件事：序列化为 JSON，再 flush 响应体。第 3
+                步的 流式循环会多次调用它，所以抽成一个方法。把它作为文件级
+                static class 放在 <code>Program.cs</code> 底部，<code
+                  >app.Run();</code
+                >
+                之后。
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 说明</span>
+                <p>
+                  <strong>必需的 using（不在隐式 usings 中）：</strong>在
+                  <code>Program.cs</code> 顶部加上
+                  <code>using System.Text.Json;</code>。
+                  <code>JsonSerializer</code> 就在这个命名空间里，并且不在默认
+                  ASP.NET 隐式 usings 集合中。
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs</span>
+                </div>
+                <pre class="code-block"><code>internal static class SseEvent
+{
+    private static readonly JsonSerializerOptions JsonOptions =
+        new(JsonSerializerDefaults.Web);
+
+    public static async Task WriteAsync(
+        HttpResponse response, string eventName, object data, CancellationToken ct)
+    {
+        await response.WriteAsync(
+            $"event: {eventName}\ndata: {JsonSerializer.Serialize(data, JsonOptions)}\n\n", ct);
+        await response.Body.FlushAsync(ct);
+    }
+}</code></pre>
+              </div>
+              <p>
+                <code>data:</code> 后的双换行（<code>\n\n</code>）是 SSE
+                记录分隔符， 告诉
+                <code>EventSource</code>
+                事件已完整；省略它客户端会卡到连接关闭。 没有
+                <code>FlushAsync</code>，token
+                会在内存里排队，运行结束时一次性发出， 就不是流了。
+              </p>
+            </li>
+
+            <li>
+              <h3>在流打开之前接好 session</h3>
+              <p>
+                <code>/chat/stream</code> endpoint 读请求体，用
+                <a href="../lesson02/index.html">A2</a> 的
+                <code>GetOrCreateSessionAsync</code> 解析或创建 session，设好
+                SSE 响应头， 先发一个 <code>session</code> 事件。客户端存下
+                <code>sessionId</code>， 下一条消息回传它，agent
+                就能保持多轮记忆。
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 说明</span>
+                <p>
+                  <strong
+                    >第 2 步和第 3 步是同一个 <code>MapPost</code> 处理器，
+                    拆成了两个代码片段。</strong
+                  >
+                  第 2 步打开这个 lambda，第 3 步把它收尾。收尾的
+                  <code>});</code> 出现在第 3 步的末尾。把两个片段在
+                  <code>Program.cs</code> 中连续粘贴——放在其它
+                  <code>app.Map…</code> 调用之间（在
+                  <code>var app = builder.Build();</code> 之后、
+                  <code>app.Run();</code> 之前）——以构成一个完整的
+                  <code>app.MapPost("/chat/stream", …);</code> 调用。
+                </p>
+                <p>
+                  <strong
+                    >必需的 usings（如果尚未存在，请加到
+                    <code>Program.cs</code> 顶部）：</strong
+                  >
+                </p>
+                <ul>
+                  <li>
+                    <code>using Microsoft.Extensions.AI;</code> —— 流式循环内部
+                    检查的有类型内容项 <code>FunctionCallContent</code> 需要它。
+                    这个命名空间不在默认隐式 usings 集合中。
+                  </li>
+                </ul>
+                <p>
+                  <strong>假定已有的符号（从 A1/A2 沿用过来）：</strong>
+                  <code>ChatRequest</code>、<code>AgentSession</code>、
+                  <code>GetOrCreateSessionAsync</code>。这三个必须已经从 A1 和
+                  A2 课中存在于 <code>Program.cs</code> 里。 （<code
+                    >PendingApproval</code
+                  >
+                  和 <code>StoreApproval</code> 会在后面的
+                  <a href="../lesson10/index.html">C3/第10课</a> 中引入——这里
+                  并不需要它们。）
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/chat/stream", async (HttpContext context, AIAgent agent,
+    ConcurrentDictionary&lt;string, AgentSession&gt; sessions, CancellationToken ct) =&gt;
+{
+    var request = await context.Request.ReadFromJsonAsync&lt;ChatRequest&gt;(ct);
+    if (request is null || string.IsNullOrWhiteSpace(request.Message))
+    {
+        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+        return;
+    }
+
+    var (sessionId, session) =
+        await GetOrCreateSessionAsync(request.SessionId, agent, sessions, ct);
+
+    context.Response.Headers.ContentType = "text/event-stream";
+    context.Response.Headers.CacheControl = "no-cache";
+    await SseEvent.WriteAsync(context.Response, "session", new { sessionId }, ct);</code></pre>
+              </div>
+              <p>
+                设置 <code>Content-Type: text/event-stream</code> 和
+                <code>Cache-Control: no-cache</code> 是 SSE 规范要求的。少了
+                content-type 头， 代理和负载均衡器可能缓冲整个响应。
+              </p>
+            </li>
+
+            <li>
+              <h3>驱动流式循环</h3>
+              <p>
+                调用 <code>RunStreamingAsync</code>，用
+                <code>await foreach</code> 读每个更新。 循环里先看
+                <code>update.Contents</code>，再看 <code>update.Text</code>，
+                各发对应 SSE 事件。正常结束后发 <code>done</code>，抛异常则发
+                <code>error</code>。 客户端靠 <code>done</code> 知道本轮结束。
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 说明</span>
+                <p>
+                  <strong
+                    >这个片段接续并收尾第 2 步打开的
+                    <code>app.MapPost</code> lambda。</strong
+                  >
+                  最后那个 <code>});</code> 同时关闭 lambda 体和
+                  <code>MapPost</code> 调用——不要再加第二个。
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs</span>
+                </div>
+                <pre class="code-block"><code>    try
+    {
+        await foreach (var update in
+            agent.RunStreamingAsync(request.Message, session, cancellationToken: ct))
+        {
+            foreach (var content in update.Contents)
+            {
+                if (content is FunctionCallContent call)
+                {
+                    await SseEvent.WriteAsync(context.Response, "tool_call",
+                        new { name = call.Name, arguments = call.Arguments }, ct);
+                }
+            }
+
+            if (!string.IsNullOrEmpty(update.Text))
+                await SseEvent.WriteAsync(context.Response, "token",
+                    new { text = update.Text }, ct);
+        }
+
+        await SseEvent.WriteAsync(context.Response, "done", new { }, ct);
+    }
+    catch (Exception ex)
+    {
+        await SseEvent.WriteAsync(context.Response, "error",
+            new { message = ex.Message }, ct);
+    }
+});</code></pre>
+              </div>
+              <p>
+                为什么先看 <code>Contents</code> 再看
+                <code>Text</code>？单次更新可能两者都有： 模型在同一块里既发
+                tool call 又发文本。contents 循环处理结构化的 tool call，
+                文本检查随后运行。同一次更新两个事件都发是正确的。
+              </p>
+            </li>
+
+            <li>
+              <h3>为什么 session 事件要放在 try 块之前</h3>
+              <p>
+                <code>session</code> 事件写在
+                <code>try</code> 块<em>之前</em>。即便运行立即失败，
+                客户端也需要 session id。若它在 try 里、agent 在第一个 token
+                就抛异常， 客户端只会收到没有 id 的
+                <code>error</code>，无法在同一 session 里重试。 先发
+                <code>session</code> 保证 id 一定送达。
+              </p>
+            </li>
+          </ol>
+
+          <h2>更新流如何映射到 agent 的 tool 循环</h2>
+          <p>
+            事件的时序能解释终端里看到的东西。一个带 tool call 的完整 agent
+            轮次， 大致按这个顺序产生更新：
+          </p>
+          <ol>
+            <li>
+              零个或多个 <code>token</code> 事件——模型在决定调用工具之前“出声
+              思考”的文本（有些模型会发这个，有些不会）。
+            </li>
+            <li>一个 <code>tool_call</code> 事件——模型确定要调用某个函数。</li>
+            <li>静默——MAF 在本地执行工具；执行期间没有更新流出。</li>
+            <li>更多 <code>token</code> 事件——模型看到工具结果之后的答案。</li>
+            <li><code>done</code>。</li>
+          </ol>
+          <p>
+            如果智能体调用了多个工具（例如先查 schema 再做一次 SQL 查询），那么
+            <code>tool_call</code> / 静默 的模式会在最终答案 token 到达之前重复
+            出现。<code>done</code> 事件总是最后一个，并且恰好只发出一次。
+          </p>
+
+          <h2>验证</h2>
+          <div class="gate">
+            <p class="gate-title">✅ 关卡（gate） — 未变绿前不要前进</p>
+
+            <p>
+              <strong>从 Testing 环境开始（A1 起就有的强制仪式）：</strong>
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>dotnet run -- --environment Testing</code></pre>
+            </div>
+            <p>控制台必须打印 <code>Hosting environment: Testing</code>。</p>
+
+            <p>
+              <strong>用 curl 发送一个流式请求——观察 token 逐步到达：</strong>
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -N -X POST http://localhost:8124/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What projects do I have?"}'</code></pre>
+            </div>
+
+            <p>
+              <code>-N</code> 标志会禁用 curl 自身的输出缓冲，这样你就能在每个
+              SSE 事件到达时看到它。预期的输出形态（具体文本会有所不同）：
+            </p>
+            <div class="codewrap">
+              <pre class="code-block"><code>event: session
+data: {"sessionId":"a3f1..."}
+
+event: tool_call
+data: {"name":"list_projects","arguments":{}}
+
+event: token
+data: {"text":"You have "}
+
+event: token
+data: {"text":"three projects: "}
+
+event: token
+data: {"text":"claudalytics, ..."}
+
+event: done
+data: {}</code></pre>
+            </div>
+
+            <p><strong>变绿检查：</strong></p>
+            <ul>
+              <li>
+                <code>session</code> 事件最先到达，在任何
+                <code>token</code> 之前。
+              </li>
+              <li>
+                至少出现一个 <code>tool_call</code> 事件（智能体（agent）调用了
+                <code>list_projects</code> 或等价的工具）。
+              </li>
+              <li>
+                到达多个 <code>token</code> 事件，每个都带一小段文本片段——
+                而不是一整个大块。
+              </li>
+              <li>流以 <code>done</code> 结束，而不仅仅是连接被关闭。</li>
+            </ul>
+
+            <p><strong>反向测试——检测缓冲：</strong></p>
+            <p>
+              如果你只看到一个包含整个答案的 <code>token</code> 事件，紧接着就是
+              <code>done</code>，那说明响应被缓冲了。检查两件事：
+            </p>
+            <ol>
+              <li>
+                <code>SseEvent</code> 里每个 <code>WriteAsync</code> 之后是否
+                调用了 <code>FlushAsync</code>？如果它缺失，token 会在 ASP.NET
+                的 缓冲里排队，等连接关闭时一股脑全部释放。
+              </li>
+              <li>
+                你的 curl 和应用之间是否有反向代理（nginx、YARP、IIS 后的
+                Kestrel）？除非配置了
+                <code>proxy_buffering off</code> 或等价设置， 否则代理通常会缓冲
+                SSE。
+              </li>
+            </ol>
+
+            <p><strong>用第 1 步拿到的会话 id 做后续追问：</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -N -X POST http://localhost:8124/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Which of those is most expensive?", "sessionId": "a3f1..."}'</code></pre>
+            </div>
+            <p>
+              答案应当引用第一轮里的那些项目。来自
+              <a href="../lesson02/index.html">A2</a> 的同一套多轮记忆在这里也能
+              生效，因为 <code>RunStreamingAsync</code> 接受与
+              <code>RunAsync</code> 相同的 <code>AgentSession</code> 参数。
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ 常见坑</span>
+            <ul>
+              <li>
+                <strong>一整个大块 token，然后才 done</strong> → 在
+                <code>SseEvent.WriteAsync</code> 里缺了
+                <code>FlushAsync</code>。 ASP.NET
+                会缓冲响应体；如果每次写入之后没有显式刷新，所有事件都会
+                被攒在内存里，等运行结束时一起发出。在
+                <code>WriteAsync</code> 之后加上
+                <code>await response.Body.FlushAsync(ct)</code>。
+              </li>
+              <li>
+                <strong>客户端在最后一个 token 之后挂住，永远不关闭</strong>
+                → <code>done</code> 事件从未发出。当 <code>done</code> 写入位于
+                <code>try</code> 里，但排在某个抛出异常的语句之后从而被跳过时，
+                就会发生这种情况。<code>done</code> 写入必须是
+                <code>try</code> 块 里的最后一条语句，并且
+                <code>catch</code> 必须改为发出 <code>error</code>。实现了
+                <code>EventSource</code> 的浏览器在缺少
+                <code>done</code> 时会无限重连。
+              </li>
+              <li>
+                <strong
+                  >没有 tool_call 事件，但答案却提到了工具（tool）结果</strong
+                >
+                → 工具是在更上层某处通过 <code>RunAsync</code>（非流式路径）调用
+                的，或者端点（endpoint）悄悄路由（routing）到了一个非流式处理器。确认请求打到的是
+                <code>/chat/stream</code> 而不是 <code>/chat</code>。
+              </li>
+              <li>
+                <strong>客户端没有收到会话（session） id</strong> →
+                <code>session</code> 事件位于
+                <code>try</code> 块内、且在流式调用已经开始之后，因此一个
+                早期错误会把它丢弃。把 <code>session</code> 写入移到
+                <code>try</code> 块之前——它必须是设置响应头之后的第一个写入。
+              </li>
+              <li>
+                <strong>代理 / 负载均衡器缓冲了流</strong> → 在第一次写入之前，
+                给响应设置 <code>Content-Type: text/event-stream</code> 和
+                <code>Cache-Control: no-cache</code>。大多数代理会遵守这些头来
+                禁用缓冲。在 nginx 中，给 SSE 路由加上
+                <code>proxy_buffering off;</code>。
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              标记本课为已完成
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

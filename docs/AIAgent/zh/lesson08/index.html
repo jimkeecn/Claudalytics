@@ -1,0 +1,982 @@
+<!doctype html>
+<!-- lesson08/index.html — C1 · Guarded SQL + structured output -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>C1 · 受护栏保护的 SQL + 结构化输出 — MAF 课程</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="08">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">课程</a> / 模块 C / C1
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">第 08 课 · C1 · 模块 C — 打造产品</p>
+            <h1>受护栏保护的 SQL + 结构化输出</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★</span>
+              <span class="badge badge--cost">Haiku</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>你将学到什么</h2>
+          <p>
+            本课给智能体（agent）开放数据库访问权限，而这正是危险所在。一个自己写
+            SQL 的智能体可能跑
+            <code>DROP TABLE otel_logs</code> 毁掉遥测数据；可能无时间过滤地
+            扫描
+            <code>otel_logs</code
+            >，读上百万行、跑好几分钟；它的自由文本回答也没法被代码
+            直接取出字段。<strong
+              >C1 让数据库访问变安全，并让答案带类型。</strong
+            >一个 SQL
+            校验器在任何查询执行前拒绝所有写入动词、强制时间范围；<code
+              >RunAsync&lt;T&gt;</code
+            >
+            把智能体的回答变成代码能直接读的带类型 C# record。
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 讲解</span>
+            <p>
+              <strong>受护栏保护的工具模式。</strong>智能体的 SQL 工具不直接调
+              ClickHouse， 先调
+              <code>SqlValidator.Validate()</code
+              >：拒写入动词、对大表要求时间过滤、缺
+              <code>LIMIT</code> 就补。两道边界——数据库用户
+              <code>agent_ro</code> 是硬边界
+              （数据库本身拒写），校验器是软边界（用模型能读懂的错误信息提前失败）。
+            </p>
+            <p>
+              <strong>结构化输出（structured output）。</strong>
+              <code>agent.RunAsync&lt;T&gt;()</code> 强制模型返回符合
+              <code>T</code> 形状的 JSON。record 上的
+              <code>Description</code> 特性会进入发给模型的 schema，模型因此
+              知道每个字段的含义。
+            </p>
+            <p>
+              <strong>用到的具名 MAF API：</strong>
+              <code>AIAgent.RunAsync&lt;T&gt;(prompt, session)</code> ·
+              <code>AIAgent.CreateSessionAsync()</code> ·
+              <code>AgentResponse&lt;T&gt;.Result</code> ·
+              <code>AIFunctionFactory</code>（注册
+              <code>AnalysisTools</code>，在
+              <a href="../lesson01/index.html">A1</a> 已建立）。
+            </p>
+          </div>
+
+          <h2>为什么要分两个阶段？</h2>
+          <p>
+            调 <code>RunAsync&lt;T&gt;()</code> 时，MAF
+            会让模型在该次运行的每一轮都输出结构化
+            JSON——包括本该去请求数据的工具调用那一轮。结果是坏掉的循环：模型在没数据时硬填
+            <code>CostBreakdownReport</code>，JSON
+            要么为空要么是幻觉，工具根本没跑。
+          </p>
+          <p>修复办法是在同一个 session 上分两阶段：</p>
+          <ol>
+            <li>
+              <strong>收集阶段</strong>——普通
+              <code>RunAsync()</code>，开工具。智能体调
+              <code>CostBreakdown</code> 拿到真实行数据。
+            </li>
+            <li>
+              <strong>报告阶段</strong
+              >——<code>RunAsync&lt;CostBreakdownReport&gt;()</code>，
+              用指令关掉工具。智能体只对上下文里已有的数据做结构化。
+            </li>
+          </ol>
+          <p>
+            session 是那座桥：第 1 阶段的原始数据留在对话历史里，第 2 阶段读它。
+          </p>
+
+          <h2>动手构建</h2>
+          <p>
+            代码按叶子优先排列，粘贴后即可编译。<code>SqlValidator</code>
+            无依赖； <code>SchemaTools</code> 和
+            <code>AnalysisTools</code> 都需要 B1 的
+            <code>ClickHouseClient</code> 和 <code>SqlValidator</code>；接着是
+            <code>Instructions.SchemaDoc</code>，最后是 Program.cs 注册。
+          </p>
+          <ol class="steps">
+            <li>
+              <h3>步骤 1 — 添加 SQL 校验器</h3>
+              <p>
+                创建
+                <code>Tools/SqlValidator.cs</code
+                >，这就是讲解里的软边界，每次查询前运行，
+                要么返回安全查询、要么抛一条智能体能据以改正的消息。第一段声明四个正则：要求开头是
+                <code>SELECT</code
+                >/<code>WITH</code>、捕获写入和管理类关键字、检测
+                <code>LIMIT</code>、识别大表 <code>otel_logs</code>。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Tools/SqlValidator.cs — 类与正则声明</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>using System.Text.RegularExpressions;
+
+namespace AiAgent.Tools;
+
+public static partial class SqlValidator
+{
+    private const int DefaultLimit = 100;
+
+    [GeneratedRegex(@"^\s*(SELECT|WITH)\b", RegexOptions.IgnoreCase)]
+    private static partial Regex SelectOrWith();
+
+    [GeneratedRegex(@"\b(INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|RENAME|TRUNCATE|ATTACH|DETACH|OPTIMIZE|GRANT|REVOKE|KILL|SYSTEM|FORMAT)\b|\bINTO\s+OUTFILE\b", RegexOptions.IgnoreCase)]
+    private static partial Regex DeniedKeywords();
+
+    [GeneratedRegex(@"\bLIMIT\s+\d", RegexOptions.IgnoreCase)]
+    private static partial Regex HasLimit();
+
+    [GeneratedRegex(@"\botel_logs\b", RegexOptions.IgnoreCase)]
+    private static partial Regex TargetsOtelLogs();</code></pre>
+              </div>
+              <p>
+                第二段是
+                <code>Validate</code
+                >，按顺序检查：单语句、开头合法、无禁用关键字、命中
+                <code>otel_logs</code> 时要有
+                <code>Timestamp</code> 过滤。失败抛
+                <code>ArgumentException</code>，消息写给模型看；通过且无
+                <code>LIMIT</code> 就补一个再返回。
+                <code>requireTimeFilter</code> 默认 <code>true</code>，只有 C3
+                的无界工具会传 <code>false</code>。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Tools/SqlValidator.cs — Validate（闭合类）</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    public static string Validate(string query, bool requireTimeFilter = true)
+    {
+        var sql = query.Trim().TrimEnd(';').Trim();
+
+        if (sql.Contains(';'))
+            throw new ArgumentException("Only a single SQL statement is allowed.");
+
+        if (!SelectOrWith().IsMatch(sql))
+            throw new ArgumentException("Only SELECT (or WITH ... SELECT) queries are allowed.");
+
+        var denied = DeniedKeywords().Match(sql);
+        if (denied.Success)
+            throw new ArgumentException($"Keyword '{denied.Value}' is not allowed. This tool is read-only; FORMAT is appended automatically.");
+
+        if (requireTimeFilter &amp;&amp; TargetsOtelLogs().IsMatch(sql) &amp;&amp; !sql.Contains("Timestamp", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("Queries against otel_logs must filter on Timestamp (it is a large table). Add e.g. WHERE Timestamp >= now() - INTERVAL 1 DAY.");
+
+        if (!HasLimit().IsMatch(sql))
+            sql += $" LIMIT {DefaultLimit}";
+
+        return sql;
+    }
+}</code></pre>
+              </div>
+              <div class="callout callout--note">
+                <span class="callout-label">ℹ️ 说明</span>
+                <p>
+                  关键在消息。下面每个工具都用 try/catch
+                  包住并把消息当文本返回，模型读到后
+                  自己改查询。简单错误无需人工介入。
+                </p>
+              </div>
+            </li>
+
+            <li>
+              <h3>
+                步骤 2 — <code>ClickHouseClient</code>，复用自 B1（第 04 课）
+              </h3>
+              <p>
+                <code>ClickHouseClient</code> 在 B1 已建好并注册进
+                DI，这里不需要新文件。下面的 <code>SchemaTools</code> 和
+                <code>AnalysisTools</code> 通过构造函数拿到它来跑查询。
+              </p>
+            </li>
+
+            <li>
+              <h3>步骤 3 — 用查询工具扩展 <code>SchemaTools</code></h3>
+              <p>
+                A1 创建的 <code>SchemaTools</code> 只有无参
+                <code>GetSchema()</code>。这里改成
+                主构造函数形式并加三个查询方法。第一段是类声明、<code>GetSchema</code>（同
+                A1）和 <code>RunSql</code>——自由查询工具，先过
+                <code>SqlValidator.Validate()</code> 再跑，
+                错误以文本返回供模型自纠。
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 编辑已有文件</span>
+                <p>
+                  把 <code>Tools/SchemaTools.cs</code> 的内容替换为下面两段。
+                </p>
+              </div>
+              <div class="callout callout--note">
+                <span class="callout-label">ℹ️ 说明</span>
+                <p>
+                  <code>RunUnboundedSql</code> <strong>不</strong>在这里加——它是
+                  C3/第 10 课
+                  受审批关卡保护的无界工具。无关卡就加，会移除全表扫描的硬安全边界。
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Tools/SchemaTools.cs — 类、GetSchema、RunSql</span
+                  >
+                </div>
+                <pre class="code-block"><code>using System.ComponentModel;
+using AiAgent.Agents;
+
+namespace AiAgent.Tools;
+
+public sealed class SchemaTools(ClickHouseClient clickHouse)
+{
+    [Description("Returns the full ClickHouse schema reference: tables, columns, attribute extraction idioms and example queries.")]
+    public string GetSchema() =&gt; Instructions.SchemaDoc;
+
+    [Description("Executes a read-only SELECT query against the claudalytics ClickHouse database and returns rows as tab-separated text. Single statement only; otel_logs queries must filter on Timestamp; a LIMIT is added if missing.")]
+    public async Task&lt;string&gt; RunSql(
+        [Description("The SELECT (or WITH ... SELECT) query to execute.")] string query)
+    {
+        try
+        {
+            var sql = SqlValidator.Validate(query);
+            return await clickHouse.QueryAsync(sql);
+        }
+        catch (Exception ex)
+        {
+            return $"QUERY FAILED: {ex.Message}";
+        }
+    }</code></pre>
+              </div>
+              <p>
+                第二段加两个预置 list 工具。<code>ListProjects</code> 和
+                <code>ListRecentSessions</code> 对小表
+                <code>sessions</code> 跑固定查询，让智能体在
+                写关于某项目或会话的查询前先解析出真实 id，而不是瞎猜。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Tools/SchemaTools.cs —
+                    ListProjects、ListRecentSessions（闭合类）</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    [Description("Lists all project names that have telemetry data, with session counts.")]
+    public async Task&lt;string&gt; ListProjects()
+    {
+        try
+        {
+            return await clickHouse.QueryAsync(
+                "SELECT project_name, count() AS sessions, max(last_event_at) AS latest_activity " +
+                "FROM sessions FINAL GROUP BY project_name ORDER BY latest_activity DESC LIMIT 50");
+        }
+        catch (Exception ex)
+        {
+            return $"QUERY FAILED: {ex.Message}";
+        }
+    }
+
+    [Description("Lists the most recent sessions, optionally filtered to one project.")]
+    public async Task&lt;string&gt; ListRecentSessions(
+        [Description("Optional project name to filter by; empty for all projects.")] string project = "")
+    {
+        try
+        {
+            var filter = string.IsNullOrWhiteSpace(project)
+                ? ""
+                : $"WHERE project_name = '{project.Replace("'", "''")}' ";
+            return await clickHouse.QueryAsync(
+                "SELECT session_id, project_name, started_at, last_event_at, otel_event_count " +
+                $"FROM sessions FINAL {filter}ORDER BY last_event_at DESC LIMIT 20");
+        }
+        catch (Exception ex)
+        {
+            return $"QUERY FAILED: {ex.Message}";
+        }
+    }
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>步骤 4 — 添加预置的分析工具</h3>
+              <p>
+                创建
+                <code>Tools/AnalysisTools.cs</code
+                >：为最高价值的问题预写的已知正确查询， 省得模型每次现写
+                SQL。第一段是类和 <code>CostBreakdown</code>，构建最常见的
+                「按某维度看窗口内花费」查询，默认按
+                <strong>project</strong> 分组（工作区的主访问单元）。
+                它的结果就是 <code>/analyze/cost</code> 第 1
+                阶段要收集的原始数据。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Tools/AnalysisTools.cs — 类与 CostBreakdown</span
+                  >
+                </div>
+                <pre class="code-block"><code>using System.ComponentModel;
+
+namespace AiAgent.Tools;
+
+public sealed class AnalysisTools(ClickHouseClient clickHouse)
+{
+    [Description("Cost breakdown between two dates, grouped by model, project, session or day. Optionally restricted to one project. Returns cost and token sums per group, highest cost first.")]
+    public async Task&lt;string&gt; CostBreakdown(
+        [Description("Window start, ClickHouse-parseable, e.g. '2026-06-01' or 'now() - INTERVAL 7 DAY'. Quoted literals only when a date string.")] string start,
+        [Description("Window end, e.g. 'now()'.")] string end,
+        [Description("Grouping: one of model, project, session, day.")] string groupBy,
+        [Description("Optional: restrict to one project name (exact project_name). Empty = all projects.")] string? project = null)
+    {
+        var groupExpr = groupBy.Trim().ToLowerInvariant() switch
+        {
+            "model"   =&gt; "LogAttributes['model']",
+            "project" =&gt; "ResourceAttributes['project.name']",
+            "session" =&gt; "LogAttributes['session.id']",
+            "day"     =&gt; "toDate(Timestamp)",
+            _         =&gt; null,
+        };
+        if (groupExpr is null)
+            return "INVALID group_by: use model, project, session or day.";
+
+        var projectFilter = string.IsNullOrWhiteSpace(project)
+            ? ""
+            : $"\n              AND ResourceAttributes['project.name'] = '{project.Replace("'", "''")}'";
+
+        var sql = $"""
+            SELECT {groupExpr} AS grp,
+                   round(sum(toFloat64OrZero(LogAttributes['cost_usd'])), 4) AS cost_usd,
+                   sum(toUInt64OrZero(LogAttributes['input_tokens'])) AS input_tokens,
+                   sum(toUInt64OrZero(LogAttributes['output_tokens'])) AS output_tokens,
+                   sum(toUInt64OrZero(LogAttributes['cache_read_tokens'])) AS cache_read_tokens,
+                   count() AS api_requests
+            FROM otel_logs
+            WHERE LogAttributes['event.name'] = 'api_request'
+              AND Timestamp &gt;= {Expr(start)} AND Timestamp &lt; {Expr(end)}{projectFilter}
+            GROUP BY grp ORDER BY cost_usd DESC LIMIT 50
+            """;
+        return await RunValidated(sql);
+    }</code></pre>
+              </div>
+              <p>
+                第二段是
+                <code>SessionDeepDive</code
+                >：对一个会话跑五条查询——总计、工具使用、
+                文件改动、被拦截工具、访问网站——拼成一个字符串，让模型一轮内读完整会话画像。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Tools/AnalysisTools.cs — SessionDeepDive</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    [Description("Deep dive into one session: totals (cost, tokens, duration), tool usage, file mutations, blocked tools and visited sites.")]
+    public async Task&lt;string&gt; SessionDeepDive(
+        [Description("The session_id to analyze.")] string sessionId)
+    {
+        var id = sessionId.Replace("'", "''");
+
+        var totals = await RunValidated($"""
+            SELECT min(Timestamp) AS first_event, max(Timestamp) AS last_event,
+                   round(sum(toFloat64OrZero(LogAttributes['cost_usd'])), 4) AS cost_usd,
+                   sum(toUInt64OrZero(LogAttributes['input_tokens'])) AS input_tokens,
+                   sum(toUInt64OrZero(LogAttributes['output_tokens'])) AS output_tokens,
+                   countIf(LogAttributes['event.name'] = 'api_request') AS api_requests
+            FROM otel_logs
+            WHERE LogAttributes['session.id'] = '{id}' AND Timestamp &gt;= now() - INTERVAL 90 DAY
+            """);
+
+        var tools = await RunValidated($"""
+            SELECT LogAttributes['tool_name'] AS tool, count() AS calls,
+                   countIf(LogAttributes['success'] = 'true') AS successes
+            FROM otel_logs
+            WHERE LogAttributes['event.name'] = 'tool_result'
+              AND LogAttributes['session.id'] = '{id}' AND Timestamp &gt;= now() - INTERVAL 90 DAY
+            GROUP BY tool ORDER BY calls DESC LIMIT 20
+            """);
+
+        var mutations = await RunValidated(
+            $"SELECT action, count() AS files FROM file_mutations WHERE session_id = '{id}' GROUP BY action ORDER BY files DESC LIMIT 10");
+
+        var blocked = await RunValidated(
+            $"SELECT tool_name, count() AS blocked FROM blocked_tools FINAL WHERE session_id = '{id}' AND completed = 0 GROUP BY tool_name LIMIT 10");
+
+        var sites = await RunValidated(
+            $"SELECT domain, count() AS visits FROM websites_visited WHERE session_id = '{id}' GROUP BY domain ORDER BY visits DESC LIMIT 10");
+
+        return $"## Totals\n{totals}\n\n## Tool usage\n{tools}\n\n## File mutations\n{mutations}\n\n## Blocked tools\n{blocked}\n\n## Websites visited\n{sites}";
+    }</code></pre>
+              </div>
+              <p>
+                第三段是两个私有辅助。<code>RunValidated</code>
+                是上面两工具共用的 try/catch 包装：校验、执行、错误转文本。<code
+                  >Expr</code
+                >
+                守护窗口边界： <code>start</code>/<code>end</code>
+                来自用户、需作 SQL 表达式求值（如
+                <code>now() - INTERVAL 7 DAY</code
+                >），直接拼会有注入风险，所以只放行日期字面量和 简单
+                <code>now()</code>/<code>today()</code> 表达式，其余抛异常。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Tools/AnalysisTools.cs — RunValidated 与
+                    Expr（闭合类）</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    private async Task&lt;string&gt; RunValidated(string sql)
+    {
+        try
+        {
+            return await clickHouse.QueryAsync(SqlValidator.Validate(sql));
+        }
+        catch (Exception ex)
+        {
+            return $"QUERY FAILED: {ex.Message}";
+        }
+    }
+
+    private static string Expr(string value)
+    {
+        var trimmed = value.Trim().Trim('\'');
+        return System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"^[\d\-: ]+$")
+            ? $"'{trimmed}'"
+            : System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"^(now\(\)|today\(\)|yesterday\(\))(\s*[-+]\s*INTERVAL\s+\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH))?$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+                ? trimmed
+                : throw new ArgumentException($"'{value}' is not a date literal or a simple now()/today() expression.");
+    }
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>
+                步骤 5 — 填充 <code>Instructions.SchemaDoc</code>（替换 A1
+                占位符）
+              </h3>
+              <p>
+                A1 把
+                <code>Instructions.SchemaDoc</code>
+                当占位字符串引入，这里换成真实 schema 文本。 它既是
+                <code>SchemaTools.GetSchema()</code> 运行时的返回值，也通过
+                <code>Instructions.System</code> 嵌入系统提示词。第一段是 schema
+                参考本身，是给智能体读的 数据，不必背。
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 编辑已有文件</span>
+                <p>
+                  把 <code>Agents/Instructions.cs</code> 替换为下面两段。
+                  <code>Instructions.System</code> 同 A1，只填了
+                  <code>SchemaDoc</code>。
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Agents/Instructions.cs — SchemaDoc（schema 参考）</span
+                  >
+                </div>
+                <pre class="code-block"><code>namespace AiAgent.Agents;
+
+public static class Instructions
+{
+    public const string SchemaDoc = """
+        # Claudalytics ClickHouse schema (database: claudalytics, 90-day TTL)
+
+        The data has TWO query surfaces. Prefer the small typed tables when they fit;
+        use otel_logs only for cost/tokens/tool metrics and event types with no typed table.
+
+        ## Surface 1 — otel_logs (LARGE, raw OpenTelemetry logs)
+        Columns: Timestamp (DateTime64), LogAttributes (Map(String,String)),
+        ResourceAttributes (Map(String,String)), Body, SeverityText.
+        Attributes need map extraction, e.g.:
+          LogAttributes['event.name']            -- event type
+          ResourceAttributes['project.name']     -- project
+          LogAttributes['session.id']            -- session
+          toFloat64OrZero(LogAttributes['cost_usd'])
+          toUInt64OrZero(LogAttributes['input_tokens'])   -- also output_tokens,
+                                                          -- cache_read_tokens, cache_creation_tokens
+        Key event.name values:
+          'api_request'   -- one LLM call: cost_usd, input/output/cache tokens, model, duration_ms
+          'user_prompt'   -- prompt_length, (prompt text if enabled)
+          'tool_result'   -- tool_name, success ('true'/'false'), duration_ms, tool_parameters (JSON)
+          'tool_decision' -- tool_name, decision (accept/reject), source
+          'hooks.*'       -- 31 hook event types (hooks.PreToolUse, hooks.PostToolUse, ...)
+        EVERY otel_logs query MUST filter on Timestamp (e.g. Timestamp &gt;= now() - INTERVAL 7 DAY).
+
+        ## Surface 2 — typed tables (small, pre-parsed; no map extraction needed)
+        sessions(session_id, project_name, started_at, last_event_at, otel_event_count,
+                 has_otel_data, has_hook_data)
+          ENGINE ReplacingMergeTree -&gt; ALWAYS query as: FROM sessions FINAL
+        blocked_tools(timestamp, project_name, session_id, use_id, tool_name, tool_input, completed)
+          ENGINE ReplacingMergeTree(completed) -&gt; ALWAYS use FINAL;
+          after FINAL, completed = 0 means the tool call was BLOCKED (denied).
+        credential_exposures(timestamp, project_name, session_id, file_path, file_name,
+                             matched_label, pattern_category)
+        file_mutations(timestamp, project_name, session_id, file_path, file_name,
+                       file_extension, directory, action, tool_name)  -- action: update/write/delete/changed
+        compaction_events(timestamp, project_name, session_id, event_phase, trigger)  -- phase: pre/post
+        websites_visited(timestamp, project_name, session_id, url, domain, source_tool,
+                         http_status, fetch_bytes)
+
+        ## Known-correct query idioms (copy these shapes)
+        -- cost over time:
+        SELECT toStartOfHour(Timestamp) AS hour,
+               sum(toFloat64OrZero(LogAttributes['cost_usd'])) AS cost_usd
+        FROM otel_logs
+        WHERE LogAttributes['event.name'] = 'api_request'
+          AND Timestamp &gt;= now() - INTERVAL 1 DAY
+        GROUP BY hour ORDER BY hour
+
+        -- tool success rates:
+        SELECT LogAttributes['tool_name'] AS tool_name, count() AS calls,
+               countIf(LogAttributes['success'] = 'true') AS successes
+        FROM otel_logs
+        WHERE LogAttributes['event.name'] = 'tool_result'
+          AND Timestamp &gt;= now() - INTERVAL 7 DAY
+        GROUP BY tool_name ORDER BY calls DESC
+
+        -- blocked tool calls:
+        SELECT tool_name, count() AS blocked
+        FROM blocked_tools FINAL
+        WHERE completed = 0 AND timestamp &gt;= now() - INTERVAL 7 DAY
+        GROUP BY tool_name ORDER BY blocked DESC
+
+        ## Glossary
+        session     = one Claude Code conversation (session_id, tagged with project_name)
+        blocked tool = PreToolUse seen but no PostToolUse (permission denied)
+        credential exposure = Read tool touched a sensitive file (.env, id_rsa, *.pem, ...)
+        compaction  = Claude Code summarizing its context window; frequent = long/expensive session
+        cache read tokens = prompt-cache hits; high ratio vs input_tokens = cheap turns
+        """;</code></pre>
+              </div>
+              <p>
+                第二段是系统提示词
+                <code>Instructions.System</code>：告诉智能体本工作区规则——只读、
+                用 list 工具解析
+                id、优先用预置工具、用户没指定维度时先给按项目的拆分。它用
+                <code>{SchemaDoc}</code> 把 schema 插进去，保证提示词与
+                <code>GetSchema()</code> 文本一致。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Agents/Instructions.cs — System（闭合类）</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    public const string System = $"""
+        You are the Claudalytics analyst — an expert on this workspace's Claude Code
+        telemetry stored in ClickHouse. Users ask questions in natural language; you
+        answer them by writing SQL, running it with the run_sql tool, and interpreting
+        the results.
+
+        Rules:
+        - Read-only. Never attempt INSERT/ALTER/DROP — the tool and the database both
+          reject them.
+        - Use list_projects / list_recent_sessions to resolve identifiers instead of
+          guessing them.
+        - Prefer the canned tools when they fit the question: CostBreakdown for
+          cost/token grouping questions, SessionDeepDive for "tell me about session X".
+        - Project is the fundamental unit of this workspace. When the user asks about
+          cost or usage without naming a dimension, lead with a per-project breakdown
+          (CostBreakdown groupBy=project), then drill into model/session WITHIN the
+          costly project(s) using CostBreakdown's project filter.
+        - If a question truly requires scanning otel_logs without a time filter, use
+          RunUnboundedSql — it asks the user for approval first. Never use it when a
+          time-bounded query would answer the question.
+        - run_weekly_report runs the full multi-agent report — expensive. Only call it
+          when the user explicitly asks for the weekly report mid-conversation.
+        - Always end your answer with: the interpretation FIRST (what the numbers mean,
+          in plain language), then the key numbers, then the SQL you ran in a ```sql block.
+        - If a query fails, read the error, fix the query, and retry (max 3 attempts).
+        - If results are empty, say so and suggest what to check (time window, project name).
+
+        {SchemaDoc}
+        """;
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>步骤 6 — 定义结构化输出的 record</h3>
+              <p>
+                创建 <code>Models/CostBreakdownReport.cs</code>，这是
+                <code>/analyze/cost</code> 第 2
+                阶段强制模型填的形状。每个属性都带 <code>Description</code>，MAF
+                把它放进发给模型的 JSON
+                schema，模型因此既知道字段形状也知道意图。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Models/CostBreakdownReport.cs</span>
+                </div>
+                <pre class="code-block"><code>using System.ComponentModel;
+
+namespace AiAgent.Models;
+
+public sealed record CostBreakdownReport(
+    [property: Description("Two or three sentence interpretation of the spend, written for a human.")]
+    string Summary,
+    [property: Description("Total cost in USD over the analyzed window.")]
+    double TotalCostUsd,
+    [property: Description("Cost lines, highest cost first.")]
+    List&lt;CostLine&gt; Lines,
+    [property: Description("Anything unusual worth flagging; empty when nothing stands out.")]
+    List&lt;string&gt; Anomalies);
+
+public sealed record CostLine(
+    [property: Description("The group value, e.g. a model name, project or day.")]
+    string Group,
+    double CostUsd,
+    long InputTokens,
+    long OutputTokens);</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>
+                步骤 7 — 接好 <code>/analyze/cost</code> 端点（两阶段运行）
+              </h3>
+              <p>
+                在 <code>Program.cs</code> 映射一个 POST 端点，在单个共享
+                session 上跑两阶段：读请求 （窗口默认 7 天、分组默认
+                project），建 session，收集阶段用普通
+                <code>RunAsync()</code> 让智能体调
+                <code>CostBreakdown</code>；报告阶段用
+                <code>RunAsync&lt;CostBreakdownReport&gt;()</code>
+                并指令「不要调工具」，让模型只对已有数据 结构化，最后返回
+                <code>response.Result</code>。
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 放置位置</span>
+                <p>
+                  <code>MapPost</code> 加在 <code>app.Run()</code>
+                  <strong>之前</strong>。
+                  <code>internal sealed record AnalyzeCostRequest</code> 放在
+                  <strong>文件作用域、<code>app.Run();</code> 之后</strong
+                  >，与其他请求 record 同处 （在
+                  <a href="../lesson02/index.html">A2</a> 已建立）。
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — /analyze/cost 端点（app.Run() 之前）</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/analyze/cost", async (AnalyzeCostRequest? request, AIAgent agent, CancellationToken ct) =&gt;
+{
+    var window  = string.IsNullOrWhiteSpace(request?.Window)  ? "the last 7 days" : request.Window;
+    var groupBy = string.IsNullOrWhiteSpace(request?.GroupBy) ? "project" : request.GroupBy;
+    var projectScope = string.IsNullOrWhiteSpace(request?.Project)
+        ? ""
+        : $", restricted to project {request.Project}";
+
+    var session = await agent.CreateSessionAsync(ct);
+    await agent.RunAsync(
+        $"Gather the cost data for {window}, grouped by {groupBy}{projectScope}, using the CostBreakdown tool. " +
+        "Reply with just the raw data.", session, cancellationToken: ct);
+
+    var response = await agent.RunAsync&lt;CostBreakdownReport&gt;(
+        "Now produce the final report from the data you just gathered. Do not call any tools.",
+        session, cancellationToken: ct);
+
+    return Results.Ok(response.Result);
+});</code></pre>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — 请求 record（文件作用域，app.Run()
+                    之后）</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>internal sealed record AnalyzeCostRequest(string? Window, string? GroupBy, string? Project);</code></pre>
+              </div>
+              <p>
+                <code>agent.CreateSessionAsync()</code> 建一个全新 MAF
+                session——和
+                <a href="../lesson02/index.html">A2</a>
+                多轮记忆用的是同一抽象，但这里只活在本次请求里。 正是它让第 2
+                阶段能看到第 1 阶段收集的数据。
+              </p>
+            </li>
+
+            <li>
+              <h3>
+                步骤 8 — 在 DI 和 <code>AgentFactory</code> 中注册所有工具
+              </h3>
+              <p>
+                把 <code>SchemaTools</code> 和
+                <code>AnalysisTools</code> 注册为单例。两者都依赖
+                <code>ClickHouseClient</code>（B1 用
+                <code>AddHttpClient&lt;ClickHouseClient&gt;()</code> 注册）。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs — 服务注册新增项</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddSingleton&lt;SchemaTools&gt;();
+builder.Services.AddSingleton&lt;AnalysisTools&gt;();</code></pre>
+              </div>
+              <p>
+                再把工具方法接入 <code>AgentFactory</code>。相比
+                A1，签名多了一个 <code>AnalysisTools analysis</code> 参数，<code
+                  >Tools</code
+                >
+                列表在 <code>GetSchema</code>
+                下多五项：<code>RunSql</code>、<code>ListProjects</code>、<code>ListRecentSessions</code>、
+                <code>CostBreakdown</code>、<code>SessionDeepDive</code>。apiKey
+                和 client 构造同 A1。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Agents/AgentFactory.cs — 编辑已有文件（加 AnalysisTools
+                    参数并扩展 Tools 列表）</span
+                  >
+                </div>
+                <pre class="code-block"><code>public static AIAgent Create(
+    IConfiguration config,
+    SchemaTools tools,
+    AnalysisTools analysis,
+    ILoggerFactory loggerFactory)
+{
+    // apiKey + IAnthropicClient construction unchanged from A1.
+    var options = new ChatClientAgentOptions
+    {
+        Name = "claudalytics-analyst",
+        Description = "Answers natural-language questions over Claudalytics telemetry in ClickHouse.",
+        ChatOptions = new ChatOptions
+        {
+            ModelId = ModelTiers.Analyst(config),
+            Instructions = Instructions.System,
+            Tools =
+            [
+                AIFunctionFactory.Create(tools.GetSchema),
+                AIFunctionFactory.Create(tools.RunSql),
+                AIFunctionFactory.Create(tools.ListProjects),
+                AIFunctionFactory.Create(tools.ListRecentSessions),
+                AIFunctionFactory.Create(analysis.CostBreakdown),
+                AIFunctionFactory.Create(analysis.SessionDeepDive),
+            ],
+        },
+    };
+
+    return client.AsAIAgent(options, loggerFactory: loggerFactory);
+}</code></pre>
+              </div>
+              <p>
+                最后更新 <code>Program.cs</code> 的
+                <code>AIAgent</code> 注册，传入新的
+                <code>AnalysisTools</code> 参数。第三行
+                <code>GetRequiredService</code> 就是相比 A1 新增的那行。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs — 更新 AIAgent 注册</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddSingleton&lt;AIAgent&gt;(sp =&gt; AgentFactory.Create(
+    sp.GetRequiredService&lt;IConfiguration&gt;(),
+    sp.GetRequiredService&lt;SchemaTools&gt;(),
+    sp.GetRequiredService&lt;AnalysisTools&gt;(),
+    sp.GetRequiredService&lt;ILoggerFactory&gt;()));</code></pre>
+              </div>
+            </li>
+          </ol>
+
+          <h2>各部分如何协同</h2>
+          <p><code>POST /analyze/cost</code> 的请求路径：</p>
+          <ol>
+            <li>HTTP 处理器创建一个全新 <code>AgentSession</code>。</li>
+            <li>
+              <strong>收集阶段</strong>——<code>RunAsync()</code> 让智能体调
+              <code>CostBreakdown</code>：构建 SQL → 经
+              <code>SqlValidator.Validate()</code> 校验 → 经
+              <code>ClickHouseClient.QueryAsync()</code> 执行 →
+              返回供模型读的制表符分隔行。
+            </li>
+            <li>
+              <strong>报告阶段</strong>——<code
+                >RunAsync&lt;CostBreakdownReport&gt;()</code
+              >
+              强制结构化 JSON。不调工具，因为指令禁止且数据已在上下文。
+            </li>
+            <li>
+              处理器返回 <code>response.Result</code>，一个填好的
+              <code>CostBreakdownReport</code> record，可直接序列化。
+            </li>
+          </ol>
+          <p>
+            ClickHouse 用户是 <code>agent_ro</code>，在
+            <code>clickhouse/users.d/agent.xml</code> 配了
+            <code>readonly=2</code>。即便校验器被绕过，
+            数据库也拒写。两道边界协同：软边界是校验器，硬边界是数据库用户。
+          </p>
+
+          <h2>验证</h2>
+          <div class="gate">
+            <p class="gate-title">✅ 关卡 — 未变绿前不要前进</p>
+            <p>
+              <strong>以 Testing 模式启动服务</strong>（A1 已建立——<code
+                >--</code
+              >
+              分隔符不可省）：
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>dotnet run -- --environment Testing</code></pre>
+            </div>
+            <p>
+              <strong>绿灯检查 1 —— 默认分组是 project。</strong>不带
+              <code>groupBy</code> 调端点， 确认
+              <code>Lines[].Group</code> 像项目名而非模型名：
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/analyze/cost \
+  -H "Content-Type: application/json" \
+  -d '{"window":"now() - INTERVAL 7 DAY"}' | jq '{total: .totalCostUsd, first_group: .lines[0].group}'</code></pre>
+            </div>
+            <p>预期形态（数值会不同）：</p>
+            <div class="codewrap">
+              <pre class="code-block"><code>{
+  "summary": "...",
+  "totalCostUsd": 0.42,
+  "lines": [
+    { "group": "claudalytics", "costUsd": 0.31, "inputTokens": 120000, "outputTokens": 4500 },
+    { "group": "pansoftware",  "costUsd": 0.11, "inputTokens": 48000,  "outputTokens": 1800 }
+  ],
+  "anomalies": []
+}</code></pre>
+            </div>
+            <p>
+              若 <code>lines[0].group</code> 是
+              <code>claude-haiku-4-5</code> 这样的模型名，说明默认分组
+              没传进去，检查处理器的 <code>groupBy</code> 兜底。
+            </p>
+            <p>
+              <strong>绿灯检查 2 —— INSERT 被拒。</strong
+              >校验器必须在写入动词到达 ClickHouse 前就拒绝：
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code># Ask the agent to insert something via the /chat endpoint
+curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message":"Run this SQL: INSERT INTO otel_logs VALUES (now(), '"'"'bad'"'"')"}' \
+  | jq .answer</code></pre>
+            </div>
+            <p>回答应描述一次拒绝并援引校验器，数据库自始至终没被访问。</p>
+            <p>
+              <strong>反向测试 —— 结构化阶段启用工具。</strong
+              >临时从报告阶段提示词移除
+              <code>"Do not call any tools."</code>，再跑
+              <code>/analyze/cost</code>。会看到两种失败之一： JSON schema
+              被套到工具调用轮（产出空或坏的
+              <code>CostBreakdownReport</code>），或 MAF 运行时
+              抛异常。恢复指令，确认端点返回有效 record。
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ 常见坑</span>
+            <ul>
+              <li>
+                <strong
+                  >从 <code>/analyze/cost</code> 返回空或坏的
+                  <code>CostBreakdownReport</code></strong
+                >
+                → 结构化阶段开了工具，模型在调工具前就去满足 JSON
+                schema。拆两阶段：先
+                <code>RunAsync()</code> 收集，再
+                <code>RunAsync&lt;T&gt;()</code> 结构化。
+              </li>
+              <li>
+                <strong>全表扫描在 <code>otel_logs</code> 上溜过去</strong>
+                → 时间谓词检查只在
+                <code>requireTimeFilter = true</code>（默认）时触发。若加了传
+                <code>requireTimeFilter: false</code> 的工具（为
+                <a href="../lesson10/index.html">C3</a>
+                受审批的无界工具保留），确保它在审批关卡之后。
+              </li>
+              <li>
+                <strong>成本类问题，智能体自信回答却带空工具调用列表</strong>
+                →
+                <code>AnalysisTools</code>
+                没注册、工具描述缺失，或本该用收集阶段却用了结构化阶段。
+              </li>
+              <li>
+                <strong><code>FORMAT</code> 被校验器拒绝</strong>
+                → 校验器拦 <code>FORMAT</code>，因为
+                <code>ClickHouseClient</code> 自己追加
+                <code>FORMAT TSVWithNames</code>。永远别把
+                <code>FORMAT</code> 放进查询字符串。
+              </li>
+              <li>
+                <strong><code>--</code> 分隔符陷阱（A1 提醒）</strong>
+                → <code>dotnet run --environment Testing</code> 不带
+                <code>--</code> 会悄悄留在 Production、命中真实层级模型。务必用
+                <code>dotnet run -- --environment Testing</code>。
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              标记本课完成
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

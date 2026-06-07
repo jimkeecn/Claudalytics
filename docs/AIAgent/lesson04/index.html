@@ -1,0 +1,800 @@
+<!doctype html>
+<!-- lesson04/index.html — B1 ♻ — The graph, no LLM: executors & edges
+     Generated from _TEMPLATE.html. Do NOT hand-write nav/sidebar/prevnext — site.js owns them. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>
+      B1 · Executors &amp; edges: a no-LLM fan-out pipeline — MAF Curriculum
+    </title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="04">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">Curriculum</a> / Module B / B1
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">
+              Lesson 04 · B1 · Module B — The graph, before intelligence
+            </p>
+            <h1>Executors &amp; edges: a no-LLM fan-out pipeline</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★</span>
+              <span class="badge badge--cost">No LLM — free to rerun</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>What you'll learn</h2>
+          <p>
+            A Claudalytics investigation runs several ClickHouse probes against
+            telemetry, and if you wire that work as one tangled method, a wrong
+            result or a stuck run gives you no way to tell which probe failed or
+            whether they even ran in parallel. The MAF workflow runtime fixes
+            this by splitting the work into typed nodes called
+            <em>executors</em> joined by <em>edges</em>: each executor receives
+            one message type, does one job, and emits a message to the next
+            node, so every step is named, isolated, and testable on its own.
+          </p>
+          <p>
+            You do not need an LLM to use this runtime. This lesson wires a
+            planner node that fans out three probe jobs across three worker
+            nodes in parallel, then joins the raw results in a fan-in node.
+            <strong>No model is called at any point.</strong> That is
+            deliberate. With no model, every run is free and deterministic, so
+            you can rerun the graph as many times as you need while debugging
+            it. The collector you build here is ♻ scaffolding. It gets replaced
+            in <a href="../lesson06/index.html">B3</a> by an LLM synthesis node.
+            First, make the plumbing visible before anything intelligent lives
+            in it.
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 Teach</span>
+            <h3>The three primitives</h3>
+            <ul>
+              <li>
+                <strong>Executor&lt;T&gt;</strong> — a code node. Subclass it,
+                specify the input message type <code>T</code>, implement
+                <code>HandleAsync</code>. Give the executor a unique string id
+                in its constructor. One executor = one handler for one message
+                type.
+              </li>
+              <li>
+                <strong>Output protocol attributes</strong> — every message an
+                executor <em>sends</em> must be declared via
+                <code>[SendsMessage(typeof(M))]</code> on the class; messages an
+                executor <em>yields as final output</em> use
+                <code>[YieldsOutput(typeof(M))]</code>. Sends of undeclared
+                types throw at runtime with a clear error naming the executor
+                and the type. This is the contract, not a hint.
+              </li>
+              <li>
+                <strong>Edges</strong> — you register them on a
+                <code>WorkflowBuilder</code>:
+                <ul>
+                  <li>
+                    <code>AddFanOutEdge</code> — one source, N targets; a
+                    partitioner lambda maps each message to one or more target
+                    indices.
+                  </li>
+                  <li>
+                    <code>AddFanInBarrierEdge</code> — N sources, one sink; the
+                    sink fires only after every upstream has delivered. This is
+                    how you join parallel work.
+                  </li>
+                  <li>
+                    <code>AddEdge&lt;T&gt;</code> — typed direct edge with an
+                    optional predicate. The message type picks the route; the
+                    predicate can filter further.
+                  </li>
+                </ul>
+              </li>
+            </ul>
+            <p>
+              MAF API surfaces used here:
+              <code>Executor&lt;T&gt;</code>, <code>[SendsMessage]</code>,
+              <code>[YieldsOutput]</code>, <code>WorkflowBuilder</code>,
+              <code>AddFanOutEdge</code>, <code>AddFanInBarrierEdge</code>,
+              <code>AddEdge&lt;T&gt;</code>,
+              <code>IWorkflowContext.SendMessageAsync</code>,
+              <code>IWorkflowContext.YieldsOutputAsync</code>,
+              <code>builder.WithOutputFrom(...).Build()</code>.
+            </p>
+          </div>
+
+          <h2>The graph shape for this lesson</h2>
+          <p>
+            A simplified version of the investigation graph. The full app adds a
+            validator, a HITL port, and a deep-dive branch (covered in later
+            lessons).
+          </p>
+          <div class="codewrap">
+            <pre
+              class="code-block"
+            ><code>                        ┌─&gt; probe-0 ─┐
+  plan ──fan-out────────┼─&gt; probe-1 ─┼──fan-in barrier──&gt; collector ──&gt; output
+                        └─&gt; probe-2 ─┘</code></pre>
+          </div>
+
+          <h2>Build it</h2>
+
+          <div class="callout callout--build">
+            <span class="callout-label">🔧 Setup — packages</span>
+            <p>
+              This lesson introduces the Workflows runtime. Add the package
+              before writing any executor code:
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>dotnet add package Microsoft.Agents.AI.Workflows --version 1.9.0</code></pre>
+            </div>
+            <p>
+              The <code>Microsoft.Agents.AI</code> and
+              <code>Microsoft.Agents.AI.Anthropic</code> packages added in A1
+              are still required. This lesson adds no new
+              <code>&lt;NoWarn&gt;</code> entries beyond those already in
+              <code>AiAgent.csproj</code> from A1.
+            </p>
+          </div>
+
+          <ol class="steps">
+            <li>
+              <h3>Introduce the ClickHouse client</h3>
+              <p>
+                B1 is the first lesson that runs real queries against
+                ClickHouse. The probe executor you write later needs something
+                to send SQL with, so add that client first. It is a read-only
+                HTTP client that every probe executor calls. It sends each
+                request as an HTTP POST to the ClickHouse native interface and
+                returns tab-separated text (<code>TSVWithNames</code>), which is
+                the format the executors read. Connection settings come from
+                configuration (<code>CLICKHOUSE_URL</code>,
+                <code>CLICKHOUSE_USER</code>, <code>CLICKHOUSE_PASSWORD</code>).
+                The localhost defaults let the app start with no environment
+                override.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Tools/ClickHouseClient.cs</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>using Microsoft.Extensions.Configuration;
+
+namespace AiAgent.Tools;
+
+/// &lt;summary&gt;
+/// Thin HTTP client for ClickHouse, connecting as the read-only agent_ro user.
+/// Per-query limits are sent as URL settings on every request.
+/// &lt;/summary&gt;
+public sealed class ClickHouseClient(HttpClient http, IConfiguration config)
+{
+    private readonly string _baseUrl = config["CLICKHOUSE_URL"] ?? "http://localhost:8123";
+    private readonly string _user = config["CLICKHOUSE_USER"] ?? "agent_ro";
+    private readonly string _password = config["CLICKHOUSE_PASSWORD"] ?? "";
+
+    public async Task&lt;string&gt; QueryAsync(string sql, CancellationToken ct = default)
+    {
+        var url = $"{_baseUrl}/?user={Uri.EscapeDataString(_user)}" +
+                  $"&amp;password={Uri.EscapeDataString(_password)}" +
+                  "&amp;database=claudalytics" +
+                  "&amp;max_execution_time=30" +
+                  "&amp;max_result_rows=1000" +
+                  "&amp;result_overflow_mode=break";
+
+        var response = await http.PostAsync(url, new StringContent(sql + " FORMAT TSVWithNames"), ct);
+        var body = await response.Content.ReadAsStringAsync(ct);
+
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException($"ClickHouse error: {body.Trim()}");
+
+        return string.IsNullOrWhiteSpace(body) ? "(no rows)" : body.Trim();
+    }
+}</code></pre>
+              </div>
+              <p>
+                Register it in <code>Program.cs</code> before
+                <code>var app = builder.Build();</code>:
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — add before
+                    <code>var app = builder.Build();</code></span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddHttpClient&lt;ClickHouseClient&gt;();</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Define the message types</h3>
+              <p>
+                Messages are the contracts between nodes. Define them first so
+                every executor below has a typed input and output to name. Use
+                <code>sealed record</code>. Records give structural equality and
+                clear constructors, and <code>sealed</code> prevents accidental
+                subclass routing. All message types must round-trip through
+                JSON, because the workflow engine may checkpoint them.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Workflows/InvestigationModels.cs</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>using Microsoft.Agents.AI.Workflows;
+
+namespace AiAgent.Workflows;
+
+/// &lt;summary&gt;Workflow input: how many days of telemetry to investigate.&lt;/summary&gt;
+public sealed record InvestigationRequest(int Days);
+
+public sealed record ProbeJob(int Slot, string Name, string Sql, int Days);
+
+public sealed record ProbeResult(string Name, string Rows, bool HasData);</code></pre>
+              </div>
+              <p>
+                Here is who reads each field. The planner sends
+                <code>ProbeJob</code>, and the fan-out partitioner reads its
+                <code>Slot</code> to route each job to the right probe executor.
+                The probe executor sends <code>ProbeResult</code>, which the
+                collector reads to build the final output. <code>HasData</code>
+                is true when the rows hold usable numbers; the validator added
+                in a later lesson reads it.
+              </p>
+            </li>
+
+            <li>
+              <h3>Write the planner executor</h3>
+              <p>
+                The planner is the start node. It turns one request into the
+                three probe jobs the rest of the graph runs in parallel. It
+                receives an <code>InvestigationRequest</code> and sends three
+                <code>ProbeJob</code> messages. The fan-out edge you wire later
+                reads each job's <code>Slot</code> to pick which probe executor
+                gets it.
+              </p>
+              <p>
+                The <code>[SendsMessage]</code> attribute on the class is not
+                optional. It declares which message types this executor is
+                allowed to send. Omit it and the first
+                <code>SendMessageAsync</code> call throws at runtime.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs</span
+                  >
+                </div>
+                <pre class="code-block"><code>using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Workflows;
+
+namespace AiAgent.Workflows;
+
+[SendsMessage(typeof(ProbeJob))]
+public sealed class PlanExecutor() : Executor&lt;InvestigationRequest&gt;("plan")
+{
+    public override async ValueTask HandleAsync(
+        InvestigationRequest request, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        var days = Math.Clamp(request.Days, 1, 90);
+
+        ProbeJob[] jobs =
+        [
+            new(0, "cost-trend", $"""
+                SELECT toDate(Timestamp) AS day,
+                       round(sum(toFloat64OrZero(LogAttributes['cost_usd'])), 2) AS cost_usd
+                FROM otel_logs
+                WHERE LogAttributes['event.name'] = 'api_request'
+                  AND Timestamp &gt;= now() - INTERVAL {days} DAY
+                GROUP BY day ORDER BY day
+                """, days),
+            new(1, "tool-failures", $"""
+                SELECT LogAttributes['tool_name'] AS tool_name, count() AS calls,
+                       countIf(LogAttributes['success'] != 'true') AS failures
+                FROM otel_logs
+                WHERE LogAttributes['event.name'] = 'tool_result'
+                  AND Timestamp &gt;= now() - INTERVAL {days} DAY
+                GROUP BY tool_name ORDER BY failures DESC LIMIT 10
+                """, days),
+            new(2, "security-events", $"""
+                SELECT pattern_category, count() AS exposures
+                FROM credential_exposures
+                WHERE timestamp &gt;= now() - INTERVAL {days} DAY
+                GROUP BY pattern_category ORDER BY exposures DESC
+                """, days),
+        ];
+
+        foreach (var job in jobs)
+            await context.SendMessageAsync(job, cancellationToken: cancellationToken);
+    }
+}</code></pre>
+              </div>
+              <p>
+                Source:
+                <code>Workflows/InvestigationExecutors.cs — PlanExecutor</code>.
+                SQL is verbatim; this lesson omits custom progress events (B2's
+                topic).
+              </p>
+            </li>
+
+            <li>
+              <h3>Write the probe executor</h3>
+              <p>
+                This is the worker node. It runs one probe's SQL against
+                ClickHouse and reports the rows back. You write the class once
+                and create three instances of it. Each instance receives a
+                <code>ProbeJob</code> and sends a <code>ProbeResult</code> that
+                the collector reads later. The fan-out edge decides which
+                instance gets which job, so the executor itself does not need to
+                care about routing.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs — add to the SAME file,
+                    after <code>PlanExecutor</code>'s closing brace; usings are
+                    already at the top of the file from step 2.</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>[SendsMessage(typeof(ProbeResult))]
+public sealed class ProbeExecutor(string id, ClickHouseClient clickHouse) : Executor&lt;ProbeJob&gt;(id)
+{
+    public override async ValueTask HandleAsync(
+        ProbeJob job, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        string rows;
+        try
+        {
+            rows = await clickHouse.QueryAsync(job.Sql, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            rows = $"QUERY FAILED: {ex.Message}";
+        }
+
+        var hasData = !rows.StartsWith("QUERY FAILED") &amp;&amp; rows != "(no rows)" &amp;&amp; rows.Any(char.IsDigit);
+        await context.SendMessageAsync(new ProbeResult(job.Name, rows, hasData), cancellationToken: cancellationToken);
+    }
+}</code></pre>
+              </div>
+              <p>
+                Catching query failures keeps the fan-in from stalling: all
+                three probes always deliver a result. The app also writes to
+                workflow state here — that comes in
+                <a href="../lesson07/index.html">B4</a>.
+              </p>
+            </li>
+
+            <li>
+              <h3>Write the collector executor (♻ scaffolding)</h3>
+              <p>
+                The collector is the join node. It sits behind the fan-in
+                barrier and turns the three separate probe results into one
+                output. It receives <code>ProbeResult</code> messages one at a
+                time as each probe finishes. It adds each one to a list, and
+                once all three have arrived, it joins them into a single string
+                and yields that string as the workflow output.
+              </p>
+              <p>
+                This collector is ♻ scaffolding. It just concatenates the raw
+                rows so you can see the fan-in work with no LLM cost. It gets
+                replaced in <a href="../lesson06/index.html">B3</a> by a
+                <code>SynthesisExecutor</code> that writes a real report. The
+                <code>accumulated</code> list lives in an instance field, which
+                is a problem dissected in
+                <a href="../lesson07/index.html">B4</a>.
+              </p>
+              <div class="tabs">
+                <div class="tab-bar">
+                  <button class="tab-btn active">
+                    v1 — naive (concatenating collector)
+                  </button>
+                  <button class="tab-btn">
+                    v2 preview — SynthesisExecutor (built in B3, not here)
+                  </button>
+                </div>
+                <div class="tab-panel active">
+                  <div class="codewrap">
+                    <div class="code-meta">
+                      <span class="filename"
+                        >Workflows/InvestigationExecutors.cs — add to the SAME
+                        file, after <code>ProbeExecutor</code>'s closing brace;
+                        usings already at top.</span
+                      >
+                    </div>
+                    <pre class="code-block"><code>[YieldsOutput(typeof(string))]
+public sealed class CollectorExecutor() : Executor&lt;ProbeResult&gt;("collector")
+{
+    private readonly List&lt;ProbeResult&gt; accumulated = [];
+    private const int ExpectedProbes = 3;
+
+    public override async ValueTask HandleAsync(
+        ProbeResult result, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        accumulated.Add(result);
+
+        if (accumulated.Count &lt; ExpectedProbes)
+            return;
+
+        var combined = string.Join("\n\n", accumulated.Select(probe =>
+            $"=== {probe.Name} ===\n{probe.Rows}"));
+
+        await context.YieldOutputAsync(combined, cancellationToken);
+    }
+}</code></pre>
+                  </div>
+                  <div class="callout callout--note">
+                    <span class="callout-label">ℹ️</span>
+                    <p>
+                      The <code>accumulated</code> instance field works for a
+                      single run in a single process. It is the exact
+                      state-in-field trap dissected in
+                      <a href="../lesson07/index.html">B4</a>: if the process is
+                      killed and resumed, the field starts empty and the output
+                      is missing or incomplete. Right now it does its job —
+                      makes the fan-in visible and testable.
+                    </p>
+                  </div>
+                </div>
+                <div class="tab-panel">
+                  <p>
+                    This is the v2 node that replaces
+                    <code>CollectorExecutor</code> in B3. It holds a real
+                    <code>AIAgent</code> and turns the probe data into a
+                    markdown report. It is shown here only for context. Do not
+                    add it yet.
+                  </p>
+                  <div class="codewrap">
+                    <div class="code-meta">
+                      <span class="filename"
+                        >Workflows/InvestigationExecutors.cs —
+                        SynthesisExecutor</span
+                      >
+                    </div>
+                    <pre class="code-block"><code>[YieldsOutput(typeof(string))]
+public sealed class SynthesisExecutor(AIAgent writer) : Executor&lt;Findings&gt;("synthesis")
+{
+    public override async ValueTask HandleAsync(
+        Findings findings, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        var probesText = string.Join("\n\n", findings.Results.Select(probe =&gt;
+            $"## {probe.Name}\n{probe.Rows}"));
+        var notesText = findings.ValidationNotes.Count == 0
+            ? "(none)"
+            : string.Join("\n", findings.ValidationNotes);
+
+        var response = await writer.RunAsync($"""
+            Write a short markdown investigation report over the last {findings.Days} days of
+            Claude Code telemetry. Cost spike detected: {findings.CostSpike}.
+
+            Probe data (TSV):
+            {probesText}
+
+            Validator notes (mention them honestly):
+            {notesText}
+
+            Shape: headline numbers, findings, then 1-3 recommendations.
+            Use only the numbers in the data above.
+            """, cancellationToken: cancellationToken);
+
+        await context.YieldOutputAsync(response.Text, cancellationToken);
+    }
+}</code></pre>
+                  </div>
+                </div>
+              </div>
+            </li>
+
+            <li>
+              <h3>Wire the graph with WorkflowBuilder</h3>
+              <p>
+                The executors above do not know about each other. The edges you
+                register here are what connect them into one graph. This step
+                creates the nodes and the builder. The builder takes the
+                starting executor, the planner, as its constructor argument. You
+                add the edges in the next two blocks.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Workflows/ProbeWorkflow.cs</span>
+                </div>
+                <pre class="code-block"><code>using AiAgent.Tools;
+using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Workflows;
+
+namespace AiAgent.Workflows;
+
+/// &lt;summary&gt;
+/// Probe pipeline — zero LLM:
+///
+///                     ┌─&gt; probe-0 ─┐
+///   plan ──fan-out────┼─&gt; probe-1 ─┼──fan-in barrier──&gt; collector ──&gt; output
+///                     └─&gt; probe-2 ─┘
+///
+/// CollectorExecutor is ♻ scaffolding replaced by SynthesisExecutor in B3.
+/// &lt;/summary&gt;
+public static class ProbeWorkflow
+{
+    public static Workflow Build(ClickHouseClient clickHouse)
+    {
+        var plan = new PlanExecutor();
+        ProbeExecutor[] probes =
+        [
+            new("probe-0", clickHouse),
+            new("probe-1", clickHouse),
+            new("probe-2", clickHouse),
+        ];
+        var collector = new CollectorExecutor();
+
+        var builder = new WorkflowBuilder(plan);</code></pre>
+              </div>
+              <p>
+                The fan-out edge sends the planner's jobs to the probes. The
+                partitioner lambda receives each emitted <code>ProbeJob</code>
+                and returns an array of target indices. It reads the job's
+                <code>Slot</code> to pick one probe. The
+                <code>job?.Slot ?? 0</code>
+                guards against a null message; a partitioner must never throw on
+                null.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/ProbeWorkflow.cs — inside <code>Build</code>,
+                    after the builder</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>        builder.AddFanOutEdge&lt;ProbeJob&gt;(plan, probes.Select(p =&gt; (ExecutorBinding)p),
+            (job, targetCount) =&gt; [(job?.Slot ?? 0) % targetCount]);</code></pre>
+              </div>
+              <p>
+                The fan-in barrier joins the parallel probes back into one node.
+                The collector fires only after all three probes have delivered a
+                <code>ProbeResult</code>.
+                <code>WithOutputFrom(collector)</code> marks the collector as
+                the terminal node. Point it at a probe executor instead, and
+                <code>RunAsync</code> returns after the first probe rather than
+                waiting for the fan-in.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/ProbeWorkflow.cs — inside <code>Build</code>,
+                    after the fan-out edge</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>        builder.AddFanInBarrierEdge(probes.Select(p =&gt; (ExecutorBinding)p), collector);
+
+        return builder.WithOutputFrom(collector).Build();
+    }
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Expose a probe endpoint</h3>
+              <p>
+                This is the entry point that runs the graph. It builds a fresh
+                <code>Workflow</code> per request. A workflow instance is owned
+                by one runner and cannot be reused across requests, so a shared
+                instance would let one request's results leak into another.
+              </p>
+              <p>
+                <code>InProcessExecution.RunAsync(workflow, request)</code> runs
+                the graph to completion and returns a <code>Run</code>. The
+                string the collector yields with
+                <code>YieldOutputAsync</code> appears in
+                <code>run.NewEvents</code> as a
+                <code>WorkflowOutputEvent</code>. Its <code>Data</code> is the
+                value to return to the caller, so the loop scans the events for
+                that one output. The using line imports
+                <code>InProcessExecution</code>, <code>Run</code>, and
+                <code>WorkflowOutputEvent</code>.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — add before <code>app.Run();</code></span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>using Microsoft.Agents.AI.Workflows;
+
+app.MapPost("/probe", async (InvestigationRequest request, ClickHouseClient clickHouse, CancellationToken ct) =&gt;
+{
+    var workflow = ProbeWorkflow.Build(clickHouse);
+    var run = await InProcessExecution.RunAsync(workflow, request, cancellationToken: ct);
+
+    string? report = null;
+    foreach (var evt in run.NewEvents)
+        if (evt is WorkflowOutputEvent output)
+            report = output.Data?.ToString();
+
+    return Results.Ok(new { report });
+});</code></pre>
+              </div>
+              <p>
+                <strong>Cumulative state note:</strong>
+                <code>ClickHouseClient</code> is introduced in this lesson (B1)
+                — step 1 above adds the file and registers it with
+                <code
+                  >builder.Services.AddHttpClient&lt;ClickHouseClient&gt;()</code
+                >
+                before <code>var app = builder.Build();</code>. The
+                <code>/probe</code> endpoint parameter-injects it directly from
+                DI; no further registration is needed.
+              </p>
+            </li>
+          </ol>
+
+          <div class="callout callout--evolution">
+            <span class="callout-label">🔄 Evolution arc</span>
+            <p>
+              <code>CollectorExecutor</code> is Arc 1, v1 — deliberately naive.
+              It makes the fan-in observable with zero LLM cost. Two limitations
+              drive the next lessons:
+            </p>
+            <ul>
+              <li>
+                <strong>Raw TSV is unreadable.</strong> In
+                <a href="../lesson06/index.html">B3</a> you swap the collector
+                for a <code>SynthesisExecutor</code> that holds a writer agent —
+                same graph, one node now intelligent.
+              </li>
+              <li>
+                <strong
+                  >The <code>accumulated</code> field does not survive a
+                  crash.</strong
+                >
+                In <a href="../lesson07/index.html">B4</a> you wire
+                checkpointing, kill the process mid-run, and prove the field
+                version fails on resume; then you move state into the workflow
+                context.
+              </li>
+            </ul>
+          </div>
+
+          <h2>Verify</h2>
+          <div class="gate">
+            <p class="gate-title">✅ Gate — do not advance until green</p>
+
+            <p><strong>Normal path:</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/probe \
+  -H "Content-Type: application/json" \
+  -d '{"days": 7}' | jq .report</code></pre>
+            </div>
+            <p>
+              The response must be a non-empty string containing all three probe
+              names (<code>cost-trend</code>, <code>tool-failures</code>,
+              <code>security-events</code>) and at least one row of data (or a
+              <code>QUERY FAILED</code> line if ClickHouse is not seeded). The
+              important check is that all three sections appear — that proves
+              the fan-in fired after all three parallel probes delivered.
+            </p>
+
+            <p>
+              <strong
+                >Deliberate-failure exercise (costs nothing — no LLM):</strong
+              >
+            </p>
+            <p>
+              Remove the <code>[SendsMessage(typeof(ProbeJob))]</code> attribute
+              from <code>PlanExecutor</code>, recompile, and call the endpoint
+              again. You should see:
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>System.InvalidOperationException: Executor 'plan' attempted to send message of type 'ProbeJob'
+which is not declared in its [SendsMessage] attributes.</code></pre>
+            </div>
+            <p>
+              Put the attribute back. This error text is the output protocol
+              working as designed — the contract is enforced, not advisory.
+            </p>
+
+            <p><strong>Negative test — partitioner null tolerance:</strong></p>
+            <p>
+              Remove the null guard:
+              <code>(job, targetCount) =&gt; [job.Slot % targetCount]</code>. A
+              null message from upstream produces a
+              <code>NullReferenceException</code> inside the partitioner.
+              Restore the guard. Partitioners must always be null-tolerant.
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ Pitfalls</span>
+            <ul>
+              <li>
+                <strong
+                  >Runtime throws "attempted to send message of type X, not
+                  declared"</strong
+                >
+                → you forgot a <code>[SendsMessage(typeof(X))]</code> attribute
+                on the executor class. Check every executor that calls
+                <code>SendMessageAsync</code>.
+              </li>
+              <li>
+                <strong
+                  >Collector only fires once but the output is missing two
+                  probes</strong
+                >
+                → the fan-in barrier is not registered correctly; all probe
+                executors must be in the <code>sources</code> list passed to
+                <code>AddFanInBarrierEdge</code>.
+              </li>
+              <li>
+                <strong
+                  >Partitioner throws
+                  <code>NullReferenceException</code></strong
+                >
+                → guard against null in the lambda:
+                <code>(job, n) =&gt; [(job?.Slot ?? 0) % n]</code>.
+              </li>
+              <li>
+                <strong
+                  >Workflow reused across requests and the collector sees extra
+                  results</strong
+                >
+                → a <code>Workflow</code> object is owned by exactly one runner.
+                Build a fresh instance per request with
+                <code>ProbeWorkflow.Build(...)</code>. The
+                <code>CollectorExecutor</code>'s <code>accumulated</code> field
+                starts fresh each time only because the executor object itself
+                is new.
+              </li>
+              <li>
+                <strong
+                  ><code>WithOutputFrom</code> points at the wrong
+                  executor</strong
+                >
+                → <code>RunAsync</code> returns after the first probe instead of
+                waiting for the fan-in; always point it at the final output
+                node.
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              Mark lesson complete
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

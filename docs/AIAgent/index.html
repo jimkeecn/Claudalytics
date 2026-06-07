@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Microsoft Agent Framework — Curriculum</title>
+    <link rel="stylesheet" href="assets/style.css" />
+  </head>
+  <body>
+    <div class="landing">
+      <div
+        style="
+          display: flex;
+          justify-content: flex-end;
+          gap: 6px;
+          font-size: 14px;
+          margin-bottom: 8px;
+        "
+      >
+        <strong>English</strong>
+        <span style="color: var(--text-faint)">·</span>
+        <a href="zh/index.html" style="color: var(--text-faint)">简体中文</a>
+      </div>
+      <p class="lesson-eyebrow">
+        Hands-on curriculum · 20 lessons · Claudalytics Copilot
+      </p>
+      <h1>Learn Microsoft Agent Framework by Building</h1>
+      <p class="lede">
+        You build a real backend .NET agent service from scratch — but you don't
+        retrace a finished build order. You live the evolution: build the naive
+        version, hit its breaking point, refactor into the real one. Several
+        artifacts are deliberately thrown away. That is the point.
+      </p>
+
+      <div class="callout callout--verify" style="margin-top: 28px">
+        <span class="callout-label">⚡ The verification ritual</span>
+        <p>
+          Every lesson is launched with
+          <code>dotnet run -- --environment Testing</code>. The
+          <code>--</code> separator is load-bearing — without it dotnet stays in
+          Production (expensive models, no debug logs). First gate of the whole
+          curriculum: prove the console prints
+          <code>Hosting environment: Testing</code>.
+        </p>
+      </div>
+
+      <div id="modules"></div>
+
+      <hr />
+      <p style="color: var(--text-faint); font-size: 14px">
+        Audience: a .NET developer comfortable with ASP.NET minimal APIs and
+        basic SQL. No prior agent or LLM-framework experience assumed. Cost
+        discipline is structural — Module B costs nothing to run, and every LLM
+        gate runs on the Haiku-pinned Testing environment.
+      </p>
+    </div>
+
+    <script src="assets/manifest.js"></script>
+    <script>
+      (function () {
+        var C = window.CURRICULUM;
+        var costClass = function (c) {
+          return c === "none" ? "badge--cost free" : "badge--cost";
+        };
+        var stars = function (d) {
+          return "★★★★★".slice(0, d);
+        };
+        var host = document.getElementById("modules");
+        var html = "";
+        C.modules.forEach(function (mod) {
+          var lessons = C.lessons.filter(function (l) {
+            return l.module === mod.id;
+          });
+          if (!lessons.length) return;
+          html += '<div class="module-block"><h2>' + mod.name + "</h2>";
+          html += '<p class="module-desc">' + mod.desc + "</p>";
+          html += '<div class="card-grid">';
+          lessons.forEach(function (l) {
+            html +=
+              '<a class="lesson-card" href="' +
+              l.folder +
+              '/index.html">' +
+              '<div class="lc-code">' +
+              l.code +
+              " · lesson" +
+              l.n +
+              "</div>" +
+              '<div class="lc-title">' +
+              l.title +
+              "</div>" +
+              '<div class="lc-meta">' +
+              '<span class="badge badge--diff">' +
+              stars(l.diff) +
+              "</span>" +
+              '<span class="badge ' +
+              costClass(l.cost) +
+              '">' +
+              (l.cost === "none" ? "no LLM" : l.cost) +
+              "</span>" +
+              "</div></a>";
+          });
+          html += "</div></div>";
+        });
+        host.innerHTML = html;
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,487 @@
+<!doctype html>
+<!-- lesson00/index.html — Infrastructure setup.
+     Do NOT hand-write the sidebar or prev/next: site.js generates them from manifest.js. -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>L0 · 基础设施环境准备 — MAF 课程</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="00">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">课程</a> / 环境准备 / L0
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">第 00 课 · L0 · 环境准备</p>
+            <h1>基础设施环境准备：项目、依赖包、密钥，以及 Testing 仪式</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★</span>
+              <span class="badge badge--cost">无需 LLM</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>你将学到什么</h2>
+          <p>
+            你要构建的是 Claudalytics Copilot，一个回答 LLM 成本和 ClickHouse
+            telemetry 问题的 .NET
+            agent。如果用默认设置跑每一课，每个关卡（gate）都会按全价调用真实
+            Claude 模型，而且密钥可能被提交进
+            git。本课建立一条启动命令：把每个模型锁定到便宜的 Haiku
+            层级，并从一个被 gitignore 的文件加载 API
+            key，让后续每一课都便宜、可重复、安全。
+          </p>
+          <p>
+            这里建立的脚手架贯穿全部 19 课：带精确包版本的
+            <code>.csproj</code>、两个文件的 <code>appsettings</code>
+            拆分（基础配置 + Testing 覆盖）、存放 Anthropic API key 的
+            <code>appsettings.Local.json</code> gitignore
+            模式，以及后续每个关卡都依赖的验证步骤。Docker 推迟到毕业项目（<a
+              href="../lesson19/index.html"
+              >CAP</a
+            >）再讲；现在只跑裸的 <code>dotnet run</code>。
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 讲解</span>
+            <p>
+              MAF 项目依赖三个必须一起锁定版本的包：
+              <strong>Microsoft.Agents.AI</strong>、
+              <strong>Microsoft.Agents.AI.Anthropic</strong> 和
+              <strong>Microsoft.Agents.AI.Workflows</strong>。其中 Anthropic
+              提供器包处于预览版（preview）轨道，它的后缀
+              （<code>-preview.YYMMDD.N</code>）每周都会变化 —— 锁定它
+              可以防止悄无声息的升级破坏 API。OpenTelemetry 相关包则单独锁定。
+            </p>
+            <p>
+              <strong>Testing 环境</strong>并不是一个测试项目 —— 它是由
+              <code>appsettings.Testing.json</code> 加载的一个 ASP.NET
+              命名环境，在主机启动时通过给宿主传入
+              <code>--environment Testing</code>
+              来激活。它在本课程中做两件事：把全部三个模型层级都覆盖为
+              <code>claude-haiku-4-5</code>
+              （让每个关卡只花零点几分钱），并把
+              <code>Microsoft.Agents.AI</code> 日志命名空间的级别提升到
+              <code>Debug</code>（在
+              <a href="../lesson15/index.html">E2</a>
+              中观察上下文压缩（compaction）时必需）。除了
+              <a href="../lesson13/index.html">D3</a>
+              里那次真实层级（real-tier）检查之外，你在每一课都会用到这个环境。
+            </p>
+            <p>
+              <strong><code>--</code> 分隔符是关键所在</strong>。 没有它，dotnet
+              会把 <code>--environment Testing</code> 当作
+              它自己的标志解析，而不是传给你程序的参数，于是宿主会悄悄 停留在
+              Production。这个陷阱在 E2 中会再次被点名，因为
+              它是"一个本来能用的上下文压缩（compaction）提供器却产生不出任何
+              Debug 日志"最常见的原因。
+            </p>
+          </div>
+
+          <h2>动手构建</h2>
+          <ol class="steps">
+            <li>
+              <h3>创建解决方案和 Web 项目</h3>
+              <p>
+                Copilot 是一个 Web 服务，所以从 ASP.NET minimal-API
+                项目起步。创建一个面向 .NET 9 的项目，项目名用
+                <code>AiAgent</code>：后续课程都从
+                <code>AiAgent.*</code> 命名空间导入类型，所以名字必须一致。
+              </p>
+              <div class="codewrap">
+                <pre class="code-block"><code>dotnet new sln -n Claudalytics
+dotnet new web -n AiAgent -f net9.0
+dotnet sln add AiAgent/AiAgent.csproj</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>在 AiAgent.csproj 中锁定包版本</h3>
+              <p>
+                后续课程会用到三个 MAF
+                包：<code>Microsoft.Agents.AI</code>（agent
+                运行时）、<code>Microsoft.Agents.AI.Anthropic</code>（Claude
+                provider）、<code>Microsoft.Agents.AI.Workflows</code>（workflow
+                引擎）。三个 OpenTelemetry 包把 trace 送进
+                ClickHouse。用下面锁定好的版本替换生成的
+                <code>AiAgent.csproj</code>。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">AiAgent/AiAgent.csproj</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>&lt;Project Sdk="Microsoft.NET.Sdk.Web"&gt;
+
+  &lt;PropertyGroup&gt;
+    &lt;TargetFramework&gt;net9.0&lt;/TargetFramework&gt;
+    &lt;Nullable&gt;enable&lt;/Nullable&gt;
+    &lt;ImplicitUsings&gt;enable&lt;/ImplicitUsings&gt;
+    &lt;NoWarn&gt;$(NoWarn);MAAI001;MEAI001&lt;/NoWarn&gt;
+  &lt;/PropertyGroup&gt;
+
+  &lt;ItemGroup&gt;
+    &lt;PackageReference Include="Microsoft.Agents.AI" Version="1.9.0" /&gt;
+    &lt;PackageReference Include="Microsoft.Agents.AI.Anthropic" Version="1.9.0-preview.260603.1" /&gt;
+    &lt;PackageReference Include="Microsoft.Agents.AI.Workflows" Version="1.9.0" /&gt;
+    &lt;PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.15.3" /&gt;
+    &lt;PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.15.3" /&gt;
+    &lt;PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.15.2" /&gt;
+  &lt;/ItemGroup&gt;
+
+&lt;/Project&gt;</code></pre>
+              </div>
+              <p>
+                <code>NoWarn</code> 抑制 <code>MAAI001</code> 和
+                <code>MEAI001</code> 两个预期警告：compaction 和 chat-reducer
+                API 在 MAF 1.9.0 / M.E.AI 10.5 中标记为实验性，会在
+                <a href="../lesson15/index.html">E2</a> 用到。Anthropic provider
+                包是 preview 轨道，后缀每周变化，必须锁定精确版本以防升级破坏
+                API。然后执行还原：
+              </p>
+              <div class="codewrap">
+                <pre
+                  class="code-block"
+                ><code>dotnet restore AiAgent/AiAgent.csproj</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>编写基础 appsettings.json</h3>
+              <p>
+                这个文件存放可安全提交的非密钥配置：监听
+                URL、日志级别、三个模型层级（model tier）。<a
+                  href="../lesson13/index.html"
+                  >D3</a
+                >
+                引入的
+                <code>ModelTiers</code>
+                辅助类读取层级名（<code>Light</code>、<code>Analyst</code>、<code>Reasoning</code>）。每个创建
+                agent 的课程都从这份配置读取模型名。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">AiAgent/appsettings.json</span>
+                </div>
+                <pre class="code-block"><code>{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*",
+  "Urls": "http://localhost:8124",
+  "CLICKHOUSE_URL": "http://localhost:8123",
+  "CLICKHOUSE_USER": "agent_ro",
+  "Models": {
+    "Light": "claude-haiku-4-5",
+    "Analyst": "claude-sonnet-4-6",
+    "Reasoning": "claude-opus-4-8"
+  }
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>编写 appsettings.Testing.json</h3>
+              <p>
+                这个文件是每一课的成本与安全保障网。它把三个层级全部覆盖为
+                Haiku，并为 MAF 命名空间启用 Debug 级别的日志。它是要提交的 ——
+                它不含任何密钥，且必须在每台机器上都表现一致、可预测。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">AiAgent/appsettings.Testing.json</span>
+                </div>
+                <pre class="code-block"><code>{
+  "Models": {
+    "Light": "claude-haiku-4-5",
+    "Analyst": "claude-haiku-4-5",
+    "Reasoning": "claude-haiku-4-5"
+  },
+  "Logging": {
+    "LogLevel": {
+      "Microsoft.Agents.AI": "Debug"
+    }
+  }
+}</code></pre>
+              </div>
+              <p>
+                为什么三个层级都用
+                Haiku？这些层级的存在，是为了在生产环境中让路由器（router）回合使用
+                Light 模型，而深度分析回合使用 Reasoning 模型。而在 Testing
+                里，你希望所有回合都同样便宜 —— 也同样可观测（observability）——
+                同时不改动任何调用点。这种覆盖是彻底的：任何读取
+                <code>config["Models:Reasoning"]</code> 的课程代码在 Testing
+                下拿到的都是 Haiku。
+              </p>
+            </li>
+
+            <li>
+              <h3>创建被 gitignore 的密钥文件</h3>
+              <p>
+                先把 <code>appsettings.Local.json</code> 加入
+                <code>.gitignore</code>，然后再创建该文件。绝不要颠倒这个顺序 ——
+                密钥文件哪怕一瞬间也不能出现在 git 里。
+              </p>
+              <div class="codewrap">
+                <pre
+                  class="code-block"
+                ><code># In the repo root .gitignore — add this line:
+**/appsettings.Local.json</code></pre>
+              </div>
+              <p>然后创建该文件（不要提交它）：</p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >AiAgent/appsettings.Local.json ← gitignored</span
+                  >
+                </div>
+                <pre class="code-block"><code>{
+  "ANTHROPIC_API_KEY": "sk-ant-…your-key-here…"
+}</code></pre>
+              </div>
+              <p>
+                Anthropic provider 包在启动时从配置读取
+                <code>ANTHROPIC_API_KEY</code>。在
+                <code>Program.cs</code>
+                中最后加载这个文件（在所有其他配置源之后），让它的 key
+                盖过同名环境变量。文件里只放密钥：<code>ANTHROPIC_API_KEY</code>
+                和可选的 <code>CLICKHOUSE_PASSWORD</code>。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >AiAgent/Program.cs（节选 —— 完整文件见第 6 步）</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>var builder = WebApplication.CreateBuilder(args);
+
+builder.Configuration.AddJsonFile(
+    "appsettings.Local.json", optional: true, reloadOnChange: true);</code></pre>
+              </div>
+              <p>
+                文件设为 <code>optional: true</code>，所以缺文件时 CI
+                不会失败。CI 机器上没有本地文件，改由 CI 把 key
+                作为环境变量注入。
+              </p>
+            </li>
+
+            <li>
+              <h3>添加健康检查端点（endpoint）并启动应用</h3>
+              <p>
+                添加一个最小的健康检查端点，这样在任何智能体（agent）出现之前你就有东西可以
+                curl 了。下面就是本课 <code>Program.cs</code> 的全部内容。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">AiAgent/Program.cs</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>var builder = WebApplication.CreateBuilder(args);
+
+builder.Configuration.AddJsonFile(
+    "appsettings.Local.json", optional: true, reloadOnChange: true);
+
+var app = builder.Build();
+
+app.MapGet("/healthz", () => Results.Ok(new { status = "ok" }));
+
+app.Run();</code></pre>
+              </div>
+              <p>现在带上 Testing 环境标志启动：</p>
+              <div class="codewrap">
+                <pre class="code-block"><code>cd AiAgent
+dotnet run -- --environment Testing</code></pre>
+              </div>
+              <p>
+                <code>--</code> 不是可选的。它告诉
+                <code>dotnet</code
+                >：它之后的所有内容都是传给你程序的参数，而不是传给
+                <code>dotnet run</code> 命令本身的。没有它，
+                <code>--environment</code> 会被 dotnet 解析，而不是被 ASP.NET
+                的宿主构建器解析，于是你的进程会悄悄启动到
+                <code>Production</code> 环境。
+              </p>
+            </li>
+          </ol>
+
+          <h2>环境配置栈是如何加载的</h2>
+          <p>ASP.NET 按以下顺序加载配置源，越靠后的源会盖过越靠前的源：</p>
+          <ol>
+            <li><code>appsettings.json</code> —— 基础值（已提交）</li>
+            <li>
+              <code>appsettings.{Environment}.json</code> —— 环境覆盖层；在
+              Testing 下即 <code>appsettings.Testing.json</code>（已提交）
+            </li>
+            <li>环境变量 —— CI 在这里注入密钥</li>
+            <li>
+              <code>appsettings.Local.json</code> —— 开发者密钥，最后加载（被
+              gitignore）
+            </li>
+          </ol>
+          <p>
+            结果是：在你的机器上，Anthropic API key 来自
+            <code>appsettings.Local.json</code>；在 CI
+            中它来自环境变量；两种情况下这个 key
+            都会盖过此前的任何配置源。只要环境是
+            <code>Testing</code>，模型层级就会被
+            <code>appsettings.Testing.json</code> 覆盖为 Haiku。
+          </p>
+
+          <h2>验证</h2>
+          <div class="gate">
+            <p class="gate-title">✅ 关卡（gate）— 未变绿前不要前进</p>
+
+            <p>
+              <strong>绿灯检查 1 —— 在控制台输出中确认环境。</strong>
+            </p>
+            <p>
+              当你运行
+              <code>dotnet run -- --environment Testing</code> 时，ASP.NET
+              宿主会在启动期间把它的环境写入控制台。请找这一行：
+            </p>
+            <div class="codewrap">
+              <pre class="code-block"><code>info: Microsoft.Hosting.Lifetime[0]
+      Hosting environment: Testing</code></pre>
+            </div>
+            <p>
+              如果你看到的是 <code>Production</code>，那就是你忘了
+              <code>--</code> 分隔符。
+            </p>
+
+            <p><strong>绿灯检查 2 —— 健康检查端点有响应。</strong></p>
+            <div class="codewrap">
+              <pre class="code-block"><code>curl http://localhost:8124/healthz
+# Expected: {"status":"ok"}</code></pre>
+            </div>
+
+            <p><strong>反向测试 —— 悄无声息的 Production 陷阱。</strong></p>
+            <p><em>不带</em>分隔符运行，观察其中的差异：</p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code># Wrong — dotnet consumes --environment Testing itself
+dotnet run --environment Testing
+
+# The console will print:
+#   Hosting environment: Production
+# appsettings.Testing.json is NOT loaded.
+# All model tiers stay at the production values (Sonnet, Opus).
+# Any gate that checks for Haiku spans will fail.</code></pre>
+            </div>
+            <p>
+              这是整门课程中最重要的反向测试。每一课的"验证"部分都假定你处于
+              Testing。如果不是，那 Haiku
+              锁定带来的成本保证就没了，而上下文压缩（compaction）（E2）的 Debug
+              日志也会被抑制。
+            </p>
+          </div>
+
+          <div class="callout callout--note">
+            <span class="callout-label">ℹ️ 说明</span>
+            <p>
+              <strong>Docker 被推迟了。</strong>整个课程中你都直接用
+              <code>dotnet run</code> 运行后端。在毕业项目（<a
+                href="../lesson19/index.html"
+                >CAP</a
+              >）之前你<em>不会</em>需要 Docker。在那之前，直接运行
+              <code>dotnet run -- --environment Testing</code> 即可；<code
+                >appsettings.json</code
+              >
+              里的 ClickHouse URL 指向
+              localhost，是为你之后拥有本地实例时准备的，但环境准备这几课并不需要它。
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ 常见坑</span>
+            <ul>
+              <li>
+                <strong
+                  >控制台显示
+                  <code>Hosting environment: Production</code></strong
+                >
+                → 你运行的是 <code>dotnet run --environment Testing</code>，少了
+                <code>--</code> 分隔符。Dotnet
+                把这个标志吃掉了，你的程序从来没看到它。永远要写：
+                <code>dotnet run -- --environment Testing</code>。
+              </li>
+              <li>
+                <strong
+                  >构建报错 <code>MAAI001</code> 或 <code>MEAI001</code></strong
+                >
+                → <code>.csproj</code> 中缺少
+                <code>NoWarn</code> 那一行。这些是实验性上下文压缩（compaction）
+                API 的预期警告；现在就抑制它们，免得在 E2 中污染课程输出。
+              </li>
+              <li>
+                <strong>还原失败或找不到 preview 包</strong> →
+                <code>Microsoft.Agents.AI.Anthropic</code>
+                的版本后缀是带时间戳的（<code>1.9.0-preview.260603.1</code>）。如果
+                NuGet 无法解析它，请到
+                <a
+                  href="https://www.nuget.org/packages/Microsoft.Agents.AI.Anthropic"
+                  target="_blank"
+                  rel="noopener"
+                  >NuGet 列表页</a
+                >
+                查找最新的
+                <code>1.9.0-preview.*</code>
+                并更新版本字符串。锁定到你解析出来的那个版本；不要使用
+                <code>*</code> 通配符。
+              </li>
+              <li>
+                <strong>运行时找不到 API key</strong> → 确认
+                <code>appsettings.Local.json</code>
+                存在于<em>项目</em>目录中（与
+                <code>AiAgent.csproj</code> 同级），而不是解决方案根目录。
+                <code>AddJsonFile</code> 是相对于内容根（content
+                root）解析的，而用
+                <code>dotnet run</code> 运行时内容根就是项目目录。
+              </li>
+              <li>
+                <strong
+                  ><code>appsettings.Local.json</code> 出现在
+                  <code>git status</code> 里</strong
+                >
+                → 是在文件已经被跟踪之后才添加 <code>.gitignore</code>
+                条目的。运行
+                <code>git rm --cached AiAgent/appsettings.Local.json</code>
+                在不删除文件的情况下取消跟踪，然后提交
+                <code>.gitignore</code> 的改动。
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              标记本课完成
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

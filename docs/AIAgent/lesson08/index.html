@@ -1,0 +1,1049 @@
+<!doctype html>
+<!-- lesson08/index.html — C1 · Guarded SQL + structured output -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>C1 · Guarded SQL + structured output — MAF Curriculum</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="08">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">Curriculum</a> / Module C / C1
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">
+              Lesson 08 · C1 · Module C — The product
+            </p>
+            <h1>Guarded SQL + structured output</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★</span>
+              <span class="badge badge--cost">Haiku</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>What you'll learn</h2>
+          <p>
+            This lesson gives the agent direct database access. That access is
+            the danger. An agent that writes its own SQL can run
+            <code>DROP TABLE otel_logs</code> and wipe your telemetry. It can
+            scan <code>otel_logs</code> with no time filter, read millions of
+            rows, and run for minutes. And when you need a number for a
+            dashboard, a free-text paragraph is useless. Your code cannot pull
+            fields out of prose.
+            <strong
+              >C1 makes database access safe and makes the answer typed.</strong
+            >
+            A SQL validator rejects every write verb and forces a time bound
+            before any query runs. <code>RunAsync&lt;T&gt;</code> turns the
+            agent's answer into a typed C# record your code can read directly.
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 Teach</span>
+            <p>
+              <strong>The guarded-tool pattern.</strong> The agent's SQL tool
+              never calls ClickHouse straight away. It calls
+              <code>SqlValidator.Validate()</code> first. The validator rejects
+              write verbs, requires a time filter on the large table, and adds
+              <code>LIMIT 100</code> when the query has none. There are two
+              boundaries here. The database user (<code>agent_ro</code>) is the
+              hard boundary: the database itself refuses writes. The validator
+              is the soft boundary: it fails early with a message the model can
+              read and fix.
+            </p>
+            <p>
+              <strong>Structured output.</strong>
+              <code>agent.RunAsync&lt;T&gt;()</code> forces the model to return
+              JSON that matches the shape of <code>T</code>. The
+              <code>Description</code> attributes on your record become part of
+              the schema sent to the model, so the model knows what each field
+              means.
+            </p>
+            <p>
+              <strong>Named MAF API surfaces used:</strong>
+              <code>AIAgent.RunAsync&lt;T&gt;(prompt, session)</code> ·
+              <code>AIAgent.CreateSessionAsync()</code> ·
+              <code>AgentResponse&lt;T&gt;.Result</code> ·
+              <code>AIFunctionFactory</code> (registering
+              <code>AnalysisTools</code> — established in
+              <a href="../lesson01/index.html">A1</a>).
+            </p>
+          </div>
+
+          <h2>Why two phases?</h2>
+          <p>
+            When you call <code>RunAsync&lt;T&gt;()</code>, MAF tells the model
+            to return structured JSON on every round-trip in that run. That
+            includes the tool-call turn, where the model should be asking for
+            data, not writing the final report. The result is a broken loop. The
+            model tries to fill <code>CostBreakdownReport</code> with no data,
+            the JSON is empty or made up, and no tool ever runs.
+          </p>
+          <p>The fix is two phases on the same session:</p>
+          <ol>
+            <li>
+              <strong>Gather phase</strong> — plain <code>RunAsync()</code>,
+              tools on. The agent calls <code>CostBreakdown</code> and gets real
+              rows.
+            </li>
+            <li>
+              <strong>Report phase</strong> —
+              <code>RunAsync&lt;CostBreakdownReport&gt;()</code>, tools off by
+              instruction. The agent shapes the data already in its context.
+            </li>
+          </ol>
+          <p>
+            The session is the bridge. The raw data from phase 1 stays in the
+            conversation history, and phase 2 reads it.
+          </p>
+
+          <h2>Build it</h2>
+          <p>
+            The snippets are ordered leaf-first, so each file compiles right
+            after you paste it. <code>SqlValidator</code> has no dependencies.
+            <code>SchemaTools</code> and <code>AnalysisTools</code> both need
+            <code>ClickHouseClient</code> (from B1) and
+            <code>SqlValidator</code>. <code>Instructions.SchemaDoc</code> comes
+            next, then the Program.cs registrations.
+          </p>
+          <ol class="steps">
+            <li>
+              <h3>Step 1 — Add the SQL validator</h3>
+              <p>
+                Create <code>Tools/SqlValidator.cs</code>. This is the soft
+                boundary from the Teach box. It runs before every query and
+                either returns a safe query or throws a message the agent can
+                act on. It is a static class with no dependencies. The first
+                chunk declares the four regular expressions the checks use: one
+                to require <code>SELECT</code> or <code>WITH</code> at the
+                start, one to catch write and admin keywords, one to test for a
+                <code>LIMIT</code>, and one to spot the large
+                <code>otel_logs</code> table.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Tools/SqlValidator.cs — class and regex declarations</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>using System.Text.RegularExpressions;
+
+namespace AiAgent.Tools;
+
+public static partial class SqlValidator
+{
+    private const int DefaultLimit = 100;
+
+    [GeneratedRegex(@"^\s*(SELECT|WITH)\b", RegexOptions.IgnoreCase)]
+    private static partial Regex SelectOrWith();
+
+    [GeneratedRegex(@"\b(INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|RENAME|TRUNCATE|ATTACH|DETACH|OPTIMIZE|GRANT|REVOKE|KILL|SYSTEM|FORMAT)\b|\bINTO\s+OUTFILE\b", RegexOptions.IgnoreCase)]
+    private static partial Regex DeniedKeywords();
+
+    [GeneratedRegex(@"\bLIMIT\s+\d", RegexOptions.IgnoreCase)]
+    private static partial Regex HasLimit();
+
+    [GeneratedRegex(@"\botel_logs\b", RegexOptions.IgnoreCase)]
+    private static partial Regex TargetsOtelLogs();</code></pre>
+              </div>
+              <p>
+                The second chunk is the <code>Validate</code> method. It runs
+                the checks in order: one statement only, must start with
+                <code>SELECT</code> or <code>WITH</code>, no denied keyword, and
+                a <code>Timestamp</code> filter when the query hits
+                <code>otel_logs</code>. If a check fails it throws an
+                <code>ArgumentException</code> whose message is written for the
+                model, not the developer. If every check passes and the query
+                has no <code>LIMIT</code>, it adds one and returns the rewritten
+                query. The <code>requireTimeFilter</code> flag is
+                <code>true</code> here; the only caller that passes
+                <code>false</code> is the approval-gated unbounded tool in C3.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Tools/SqlValidator.cs — Validate (closes the class)</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    public static string Validate(string query, bool requireTimeFilter = true)
+    {
+        var sql = query.Trim().TrimEnd(';').Trim();
+
+        if (sql.Contains(';'))
+            throw new ArgumentException("Only a single SQL statement is allowed.");
+
+        if (!SelectOrWith().IsMatch(sql))
+            throw new ArgumentException("Only SELECT (or WITH ... SELECT) queries are allowed.");
+
+        var denied = DeniedKeywords().Match(sql);
+        if (denied.Success)
+            throw new ArgumentException($"Keyword '{denied.Value}' is not allowed. This tool is read-only; FORMAT is appended automatically.");
+
+        if (requireTimeFilter &amp;&amp; TargetsOtelLogs().IsMatch(sql) &amp;&amp; !sql.Contains("Timestamp", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("Queries against otel_logs must filter on Timestamp (it is a large table). Add e.g. WHERE Timestamp >= now() - INTERVAL 1 DAY.");
+
+        if (!HasLimit().IsMatch(sql))
+            sql += $" LIMIT {DefaultLimit}";
+
+        return sql;
+    }
+}</code></pre>
+              </div>
+              <div class="callout callout--note">
+                <span class="callout-label">ℹ️ Note</span>
+                <p>
+                  The message is the point. Each tool below wraps the call in a
+                  try/catch and returns the message as text. The model reads
+                  that text and tries a corrected query. Simple mistakes fix
+                  themselves, with no human in the loop.
+                </p>
+              </div>
+            </li>
+
+            <li>
+              <h3>
+                Step 2 — <code>ClickHouseClient</code>, reused from B1 (lesson
+                04)
+              </h3>
+              <p>
+                <code>ClickHouseClient</code> was built in B1/lesson04 and is
+                already registered in DI. No new file here. The
+                <code>SchemaTools</code> and <code>AnalysisTools</code> below
+                take it through their constructors and use it to run queries.
+              </p>
+            </li>
+
+            <li>
+              <h3>Step 3 — Expand <code>SchemaTools</code> with query tools</h3>
+              <p>
+                <code>SchemaTools</code> was created in A1/lesson01 with one
+                no-arg <code>GetSchema()</code> method and no constructor. Here
+                you change it to the primary-constructor form and add three
+                query methods. The first chunk holds the class declaration,
+                <code>GetSchema</code> (unchanged from A1), and
+                <code>RunSql</code>. <code>RunSql</code> is the free-form query
+                tool: it passes the model's query through
+                <code>SqlValidator.Validate()</code> before
+                <code>ClickHouseClient</code> runs it, and returns any error as
+                text so the model can self-correct.
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 Edit existing</span>
+                <p>
+                  Replace the contents of <code>Tools/SchemaTools.cs</code> with
+                  the two chunks below.
+                </p>
+              </div>
+              <div class="callout callout--note">
+                <span class="callout-label">ℹ️ Note</span>
+                <p>
+                  <code>RunUnboundedSql</code> is <strong>not</strong> added
+                  here. It is the approval-gated unbounded tool from
+                  C3/lesson10. Adding it now, without the approval gate, would
+                  remove the hard safety boundary for full-table scans.
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Tools/SchemaTools.cs — class, GetSchema, RunSql</span
+                  >
+                </div>
+                <pre class="code-block"><code>using System.ComponentModel;
+using AiAgent.Agents;
+
+namespace AiAgent.Tools;
+
+public sealed class SchemaTools(ClickHouseClient clickHouse)
+{
+    [Description("Returns the full ClickHouse schema reference: tables, columns, attribute extraction idioms and example queries.")]
+    public string GetSchema() =&gt; Instructions.SchemaDoc;
+
+    [Description("Executes a read-only SELECT query against the claudalytics ClickHouse database and returns rows as tab-separated text. Single statement only; otel_logs queries must filter on Timestamp; a LIMIT is added if missing.")]
+    public async Task&lt;string&gt; RunSql(
+        [Description("The SELECT (or WITH ... SELECT) query to execute.")] string query)
+    {
+        try
+        {
+            var sql = SqlValidator.Validate(query);
+            return await clickHouse.QueryAsync(sql);
+        }
+        catch (Exception ex)
+        {
+            return $"QUERY FAILED: {ex.Message}";
+        }
+    }</code></pre>
+              </div>
+              <p>
+                The second chunk adds two canned list tools.
+                <code>ListProjects</code> and
+                <code>ListRecentSessions</code> run fixed queries against the
+                small <code>sessions</code> table. The agent calls them to
+                resolve a real project or session id before it writes a query
+                about one, instead of guessing the id.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Tools/SchemaTools.cs — ListProjects, ListRecentSessions
+                    (closes the class)</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    [Description("Lists all project names that have telemetry data, with session counts.")]
+    public async Task&lt;string&gt; ListProjects()
+    {
+        try
+        {
+            return await clickHouse.QueryAsync(
+                "SELECT project_name, count() AS sessions, max(last_event_at) AS latest_activity " +
+                "FROM sessions FINAL GROUP BY project_name ORDER BY latest_activity DESC LIMIT 50");
+        }
+        catch (Exception ex)
+        {
+            return $"QUERY FAILED: {ex.Message}";
+        }
+    }
+
+    [Description("Lists the most recent sessions, optionally filtered to one project.")]
+    public async Task&lt;string&gt; ListRecentSessions(
+        [Description("Optional project name to filter by; empty for all projects.")] string project = "")
+    {
+        try
+        {
+            var filter = string.IsNullOrWhiteSpace(project)
+                ? ""
+                : $"WHERE project_name = '{project.Replace("'", "''")}' ";
+            return await clickHouse.QueryAsync(
+                "SELECT session_id, project_name, started_at, last_event_at, otel_event_count " +
+                $"FROM sessions FINAL {filter}ORDER BY last_event_at DESC LIMIT 20");
+        }
+        catch (Exception ex)
+        {
+            return $"QUERY FAILED: {ex.Message}";
+        }
+    }
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Step 4 — Add the canned analysis tools</h3>
+              <p>
+                Create <code>Tools/AnalysisTools.cs</code>. These are
+                prewritten, known-correct queries for the highest-value
+                questions, so the model does not have to write the SQL each
+                time. The first chunk is the class and
+                <code>CostBreakdown</code>. It builds the query for the most
+                common question shape — cost by some dimension over a window.
+                The default grouping is <strong>project</strong>, because
+                project is the main access unit of a Claude Code workspace. The
+                result of <code>CostBreakdown</code> is the raw data that phase
+                1 of <code>/analyze/cost</code> gathers.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Tools/AnalysisTools.cs — class and CostBreakdown</span
+                  >
+                </div>
+                <pre class="code-block"><code>using System.ComponentModel;
+
+namespace AiAgent.Tools;
+
+public sealed class AnalysisTools(ClickHouseClient clickHouse)
+{
+    [Description("Cost breakdown between two dates, grouped by model, project, session or day. Optionally restricted to one project. Returns cost and token sums per group, highest cost first.")]
+    public async Task&lt;string&gt; CostBreakdown(
+        [Description("Window start, ClickHouse-parseable, e.g. '2026-06-01' or 'now() - INTERVAL 7 DAY'. Quoted literals only when a date string.")] string start,
+        [Description("Window end, e.g. 'now()'.")] string end,
+        [Description("Grouping: one of model, project, session, day.")] string groupBy,
+        [Description("Optional: restrict to one project name (exact project_name). Empty = all projects.")] string? project = null)
+    {
+        var groupExpr = groupBy.Trim().ToLowerInvariant() switch
+        {
+            "model"   =&gt; "LogAttributes['model']",
+            "project" =&gt; "ResourceAttributes['project.name']",
+            "session" =&gt; "LogAttributes['session.id']",
+            "day"     =&gt; "toDate(Timestamp)",
+            _         =&gt; null,
+        };
+        if (groupExpr is null)
+            return "INVALID group_by: use model, project, session or day.";
+
+        var projectFilter = string.IsNullOrWhiteSpace(project)
+            ? ""
+            : $"\n              AND ResourceAttributes['project.name'] = '{project.Replace("'", "''")}'";
+
+        var sql = $"""
+            SELECT {groupExpr} AS grp,
+                   round(sum(toFloat64OrZero(LogAttributes['cost_usd'])), 4) AS cost_usd,
+                   sum(toUInt64OrZero(LogAttributes['input_tokens'])) AS input_tokens,
+                   sum(toUInt64OrZero(LogAttributes['output_tokens'])) AS output_tokens,
+                   sum(toUInt64OrZero(LogAttributes['cache_read_tokens'])) AS cache_read_tokens,
+                   count() AS api_requests
+            FROM otel_logs
+            WHERE LogAttributes['event.name'] = 'api_request'
+              AND Timestamp &gt;= {Expr(start)} AND Timestamp &lt; {Expr(end)}{projectFilter}
+            GROUP BY grp ORDER BY cost_usd DESC LIMIT 50
+            """;
+        return await RunValidated(sql);
+    }</code></pre>
+              </div>
+              <p>
+                The second chunk is <code>SessionDeepDive</code>. It runs five
+                queries against one session — totals, tool usage, file
+                mutations, blocked tools, and visited sites — and joins the TSV
+                results into one string. The model reads the whole picture of a
+                session in a single turn.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Tools/AnalysisTools.cs — SessionDeepDive</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    [Description("Deep dive into one session: totals (cost, tokens, duration), tool usage, file mutations, blocked tools and visited sites.")]
+    public async Task&lt;string&gt; SessionDeepDive(
+        [Description("The session_id to analyze.")] string sessionId)
+    {
+        var id = sessionId.Replace("'", "''");
+
+        var totals = await RunValidated($"""
+            SELECT min(Timestamp) AS first_event, max(Timestamp) AS last_event,
+                   round(sum(toFloat64OrZero(LogAttributes['cost_usd'])), 4) AS cost_usd,
+                   sum(toUInt64OrZero(LogAttributes['input_tokens'])) AS input_tokens,
+                   sum(toUInt64OrZero(LogAttributes['output_tokens'])) AS output_tokens,
+                   countIf(LogAttributes['event.name'] = 'api_request') AS api_requests
+            FROM otel_logs
+            WHERE LogAttributes['session.id'] = '{id}' AND Timestamp &gt;= now() - INTERVAL 90 DAY
+            """);
+
+        var tools = await RunValidated($"""
+            SELECT LogAttributes['tool_name'] AS tool, count() AS calls,
+                   countIf(LogAttributes['success'] = 'true') AS successes
+            FROM otel_logs
+            WHERE LogAttributes['event.name'] = 'tool_result'
+              AND LogAttributes['session.id'] = '{id}' AND Timestamp &gt;= now() - INTERVAL 90 DAY
+            GROUP BY tool ORDER BY calls DESC LIMIT 20
+            """);
+
+        var mutations = await RunValidated(
+            $"SELECT action, count() AS files FROM file_mutations WHERE session_id = '{id}' GROUP BY action ORDER BY files DESC LIMIT 10");
+
+        var blocked = await RunValidated(
+            $"SELECT tool_name, count() AS blocked FROM blocked_tools FINAL WHERE session_id = '{id}' AND completed = 0 GROUP BY tool_name LIMIT 10");
+
+        var sites = await RunValidated(
+            $"SELECT domain, count() AS visits FROM websites_visited WHERE session_id = '{id}' GROUP BY domain ORDER BY visits DESC LIMIT 10");
+
+        return $"## Totals\n{totals}\n\n## Tool usage\n{tools}\n\n## File mutations\n{mutations}\n\n## Blocked tools\n{blocked}\n\n## Websites visited\n{sites}";
+    }</code></pre>
+              </div>
+              <p>
+                The third chunk is the two private helpers.
+                <code>RunValidated</code> is the shared try/catch wrapper that
+                both tools above call: validate, run, return errors as text.
+                <code>Expr</code> guards the window bounds. The
+                <code>start</code> and <code>end</code> values come from the
+                user and must work as SQL expressions, like
+                <code>now() - INTERVAL 7 DAY</code>. Putting them straight into
+                SQL would open an injection hole. <code>Expr</code> allows only
+                date literals and simple <code>now()</code> /
+                <code>today()</code> expressions, and throws on anything else.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Tools/AnalysisTools.cs — RunValidated and Expr (closes the
+                    class)</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    private async Task&lt;string&gt; RunValidated(string sql)
+    {
+        try
+        {
+            return await clickHouse.QueryAsync(SqlValidator.Validate(sql));
+        }
+        catch (Exception ex)
+        {
+            return $"QUERY FAILED: {ex.Message}";
+        }
+    }
+
+    private static string Expr(string value)
+    {
+        var trimmed = value.Trim().Trim('\'');
+        return System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"^[\d\-: ]+$")
+            ? $"'{trimmed}'"
+            : System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"^(now\(\)|today\(\)|yesterday\(\))(\s*[-+]\s*INTERVAL\s+\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH))?$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+                ? trimmed
+                : throw new ArgumentException($"'{value}' is not a date literal or a simple now()/today() expression.");
+    }
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>
+                Step 5 — Fill in <code>Instructions.SchemaDoc</code> (replace
+                the A1 placeholder)
+              </h3>
+              <p>
+                A1/lesson01 added <code>Instructions.SchemaDoc</code> as a
+                placeholder string. Replace it with the real schema text. This
+                constant is what <code>SchemaTools.GetSchema()</code> returns at
+                runtime, and it is also embedded in the system prompt through
+                <code>Instructions.System</code>. The first chunk is the schema
+                reference itself. It is data the agent reads, not logic. You do
+                not need to memorize it; the model uses it to write correct
+                queries.
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 Edit existing</span>
+                <p>
+                  Replace the contents of
+                  <code>Agents/Instructions.cs</code> with the two chunks below.
+                  <code>Instructions.System</code> is unchanged from A1; only
+                  <code>SchemaDoc</code> is filled in.
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Agents/Instructions.cs — SchemaDoc (the schema
+                    reference)</span
+                  >
+                </div>
+                <pre class="code-block"><code>namespace AiAgent.Agents;
+
+public static class Instructions
+{
+    public const string SchemaDoc = """
+        # Claudalytics ClickHouse schema (database: claudalytics, 90-day TTL)
+
+        The data has TWO query surfaces. Prefer the small typed tables when they fit;
+        use otel_logs only for cost/tokens/tool metrics and event types with no typed table.
+
+        ## Surface 1 — otel_logs (LARGE, raw OpenTelemetry logs)
+        Columns: Timestamp (DateTime64), LogAttributes (Map(String,String)),
+        ResourceAttributes (Map(String,String)), Body, SeverityText.
+        Attributes need map extraction, e.g.:
+          LogAttributes['event.name']            -- event type
+          ResourceAttributes['project.name']     -- project
+          LogAttributes['session.id']            -- session
+          toFloat64OrZero(LogAttributes['cost_usd'])
+          toUInt64OrZero(LogAttributes['input_tokens'])   -- also output_tokens,
+                                                          -- cache_read_tokens, cache_creation_tokens
+        Key event.name values:
+          'api_request'   -- one LLM call: cost_usd, input/output/cache tokens, model, duration_ms
+          'user_prompt'   -- prompt_length, (prompt text if enabled)
+          'tool_result'   -- tool_name, success ('true'/'false'), duration_ms, tool_parameters (JSON)
+          'tool_decision' -- tool_name, decision (accept/reject), source
+          'hooks.*'       -- 31 hook event types (hooks.PreToolUse, hooks.PostToolUse, ...)
+        EVERY otel_logs query MUST filter on Timestamp (e.g. Timestamp &gt;= now() - INTERVAL 7 DAY).
+
+        ## Surface 2 — typed tables (small, pre-parsed; no map extraction needed)
+        sessions(session_id, project_name, started_at, last_event_at, otel_event_count,
+                 has_otel_data, has_hook_data)
+          ENGINE ReplacingMergeTree -&gt; ALWAYS query as: FROM sessions FINAL
+        blocked_tools(timestamp, project_name, session_id, use_id, tool_name, tool_input, completed)
+          ENGINE ReplacingMergeTree(completed) -&gt; ALWAYS use FINAL;
+          after FINAL, completed = 0 means the tool call was BLOCKED (denied).
+        credential_exposures(timestamp, project_name, session_id, file_path, file_name,
+                             matched_label, pattern_category)
+        file_mutations(timestamp, project_name, session_id, file_path, file_name,
+                       file_extension, directory, action, tool_name)  -- action: update/write/delete/changed
+        compaction_events(timestamp, project_name, session_id, event_phase, trigger)  -- phase: pre/post
+        websites_visited(timestamp, project_name, session_id, url, domain, source_tool,
+                         http_status, fetch_bytes)
+
+        ## Known-correct query idioms (copy these shapes)
+        -- cost over time:
+        SELECT toStartOfHour(Timestamp) AS hour,
+               sum(toFloat64OrZero(LogAttributes['cost_usd'])) AS cost_usd
+        FROM otel_logs
+        WHERE LogAttributes['event.name'] = 'api_request'
+          AND Timestamp &gt;= now() - INTERVAL 1 DAY
+        GROUP BY hour ORDER BY hour
+
+        -- tool success rates:
+        SELECT LogAttributes['tool_name'] AS tool_name, count() AS calls,
+               countIf(LogAttributes['success'] = 'true') AS successes
+        FROM otel_logs
+        WHERE LogAttributes['event.name'] = 'tool_result'
+          AND Timestamp &gt;= now() - INTERVAL 7 DAY
+        GROUP BY tool_name ORDER BY calls DESC
+
+        -- blocked tool calls:
+        SELECT tool_name, count() AS blocked
+        FROM blocked_tools FINAL
+        WHERE completed = 0 AND timestamp &gt;= now() - INTERVAL 7 DAY
+        GROUP BY tool_name ORDER BY blocked DESC
+
+        ## Glossary
+        session     = one Claude Code conversation (session_id, tagged with project_name)
+        blocked tool = PreToolUse seen but no PostToolUse (permission denied)
+        credential exposure = Read tool touched a sensitive file (.env, id_rsa, *.pem, ...)
+        compaction  = Claude Code summarizing its context window; frequent = long/expensive session
+        cache read tokens = prompt-cache hits; high ratio vs input_tokens = cheap turns
+        """;</code></pre>
+              </div>
+              <p>
+                The second chunk is <code>Instructions.System</code>, the system
+                prompt. It tells the agent the rules of this workspace: stay
+                read-only, resolve ids with the list tools, prefer the canned
+                tools, and lead with a per-project breakdown when the user names
+                no dimension. The schema reference is interpolated into it with
+                <code>{SchemaDoc}</code>, so the prompt and
+                <code>GetSchema()</code> always show the same text.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Agents/Instructions.cs — System (closes the class)</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    public const string System = $"""
+        You are the Claudalytics analyst — an expert on this workspace's Claude Code
+        telemetry stored in ClickHouse. Users ask questions in natural language; you
+        answer them by writing SQL, running it with the run_sql tool, and interpreting
+        the results.
+
+        Rules:
+        - Read-only. Never attempt INSERT/ALTER/DROP — the tool and the database both
+          reject them.
+        - Use list_projects / list_recent_sessions to resolve identifiers instead of
+          guessing them.
+        - Prefer the canned tools when they fit the question: CostBreakdown for
+          cost/token grouping questions, SessionDeepDive for "tell me about session X".
+        - Project is the fundamental unit of this workspace. When the user asks about
+          cost or usage without naming a dimension, lead with a per-project breakdown
+          (CostBreakdown groupBy=project), then drill into model/session WITHIN the
+          costly project(s) using CostBreakdown's project filter.
+        - If a question truly requires scanning otel_logs without a time filter, use
+          RunUnboundedSql — it asks the user for approval first. Never use it when a
+          time-bounded query would answer the question.
+        - run_weekly_report runs the full multi-agent report — expensive. Only call it
+          when the user explicitly asks for the weekly report mid-conversation.
+        - Always end your answer with: the interpretation FIRST (what the numbers mean,
+          in plain language), then the key numbers, then the SQL you ran in a ```sql block.
+        - If a query fails, read the error, fix the query, and retry (max 3 attempts).
+        - If results are empty, say so and suggest what to check (time window, project name).
+
+        {SchemaDoc}
+        """;
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Step 6 — Define the structured-output record</h3>
+              <p>
+                Create <code>Models/CostBreakdownReport.cs</code>. This is the
+                shape phase 2 of <code>/analyze/cost</code> forces the model to
+                fill. Every property carries a
+                <code>Description</code> attribute. MAF puts these in the JSON
+                schema it sends the model, so the model knows not just the shape
+                of each field but its intent.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Models/CostBreakdownReport.cs</span>
+                </div>
+                <pre class="code-block"><code>using System.ComponentModel;
+
+namespace AiAgent.Models;
+
+public sealed record CostBreakdownReport(
+    [property: Description("Two or three sentence interpretation of the spend, written for a human.")]
+    string Summary,
+    [property: Description("Total cost in USD over the analyzed window.")]
+    double TotalCostUsd,
+    [property: Description("Cost lines, highest cost first.")]
+    List&lt;CostLine&gt; Lines,
+    [property: Description("Anything unusual worth flagging; empty when nothing stands out.")]
+    List&lt;string&gt; Anomalies);
+
+public sealed record CostLine(
+    [property: Description("The group value, e.g. a model name, project or day.")]
+    string Group,
+    double CostUsd,
+    long InputTokens,
+    long OutputTokens);</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>
+                Step 7 — Wire the <code>/analyze/cost</code> endpoint (two-phase
+                run)
+              </h3>
+              <p>
+                In <code>Program.cs</code>, map a POST endpoint that runs the
+                two-phase pattern on one shared session. The handler reads the
+                request, defaulting the window to the last 7 days and the
+                grouping to project. It creates a session, then runs the gather
+                phase with plain <code>RunAsync()</code> so the agent can call
+                <code>CostBreakdown</code>. The report phase calls
+                <code>RunAsync&lt;CostBreakdownReport&gt;()</code> with the
+                instruction to call no tools, so the model only shapes the data
+                it already has. The handler returns
+                <code>response.Result</code>, the filled record.
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 Placement</span>
+                <p>
+                  Add the <code>MapPost</code> call to <code>Program.cs</code>
+                  <strong>before</strong> <code>app.Run()</code>. The
+                  <code>internal sealed record AnalyzeCostRequest</code>
+                  declaration goes at
+                  <strong>file scope after <code>app.Run();</code></strong> —
+                  the same place all other request records in
+                  <code>Program.cs</code> live (established in
+                  <a href="../lesson02/index.html">A2</a>).
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — /analyze/cost endpoint (before
+                    app.Run())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/analyze/cost", async (AnalyzeCostRequest? request, AIAgent agent, CancellationToken ct) =&gt;
+{
+    var window  = string.IsNullOrWhiteSpace(request?.Window)  ? "the last 7 days" : request.Window;
+    var groupBy = string.IsNullOrWhiteSpace(request?.GroupBy) ? "project" : request.GroupBy;
+    var projectScope = string.IsNullOrWhiteSpace(request?.Project)
+        ? ""
+        : $", restricted to project {request.Project}";
+
+    var session = await agent.CreateSessionAsync(ct);
+    await agent.RunAsync(
+        $"Gather the cost data for {window}, grouped by {groupBy}{projectScope}, using the CostBreakdown tool. " +
+        "Reply with just the raw data.", session, cancellationToken: ct);
+
+    var response = await agent.RunAsync&lt;CostBreakdownReport&gt;(
+        "Now produce the final report from the data you just gathered. Do not call any tools.",
+        session, cancellationToken: ct);
+
+    return Results.Ok(response.Result);
+});</code></pre>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — request record (file scope, after
+                    app.Run())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>internal sealed record AnalyzeCostRequest(string? Window, string? GroupBy, string? Project);</code></pre>
+              </div>
+              <p>
+                <code>agent.CreateSessionAsync()</code> creates a fresh MAF
+                session. It is the same abstraction
+                <a href="../lesson02/index.html">A2</a> used for multi-turn
+                memory, but here it is local to this one request. The session is
+                what lets phase 2 see the data phase 1 gathered.
+              </p>
+            </li>
+
+            <li>
+              <h3>
+                Step 8 — Register all tools in DI and
+                <code>AgentFactory</code>
+              </h3>
+              <p>
+                Register <code>SchemaTools</code> and
+                <code>AnalysisTools</code> as singletons. Both depend on
+                <code>ClickHouseClient</code>, which B1 registered with
+                <code>AddHttpClient&lt;ClickHouseClient&gt;()</code>.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — service registration additions</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddSingleton&lt;SchemaTools&gt;();
+builder.Services.AddSingleton&lt;AnalysisTools&gt;();</code></pre>
+              </div>
+              <p>
+                Then wire the tool methods into <code>AgentFactory</code>. Since
+                A1, the signature gains an
+                <code>AnalysisTools analysis</code> parameter, and the
+                <code>Tools</code> list gains five entries below
+                <code>GetSchema</code>: <code>RunSql</code>,
+                <code>ListProjects</code>, <code>ListRecentSessions</code>,
+                <code>CostBreakdown</code>, and <code>SessionDeepDive</code>.
+                The apiKey and client construction are unchanged from A1.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Agents/AgentFactory.cs — edit existing (add the
+                    AnalysisTools parameter and expand the Tools list)</span
+                  >
+                </div>
+                <pre class="code-block"><code>public static AIAgent Create(
+    IConfiguration config,
+    SchemaTools tools,
+    AnalysisTools analysis,
+    ILoggerFactory loggerFactory)
+{
+    // apiKey + IAnthropicClient construction unchanged from A1.
+    var options = new ChatClientAgentOptions
+    {
+        Name = "claudalytics-analyst",
+        Description = "Answers natural-language questions over Claudalytics telemetry in ClickHouse.",
+        ChatOptions = new ChatOptions
+        {
+            ModelId = ModelTiers.Analyst(config),
+            Instructions = Instructions.System,
+            Tools =
+            [
+                AIFunctionFactory.Create(tools.GetSchema),
+                AIFunctionFactory.Create(tools.RunSql),
+                AIFunctionFactory.Create(tools.ListProjects),
+                AIFunctionFactory.Create(tools.ListRecentSessions),
+                AIFunctionFactory.Create(analysis.CostBreakdown),
+                AIFunctionFactory.Create(analysis.SessionDeepDive),
+            ],
+        },
+    };
+
+    return client.AsAIAgent(options, loggerFactory: loggerFactory);
+}</code></pre>
+              </div>
+              <p>
+                Finally, update the <code>AIAgent</code> registration in
+                <code>Program.cs</code> to pass the new
+                <code>AnalysisTools</code> argument. The third
+                <code>GetRequiredService</code> line is the one new line since
+                A1.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — update the AIAgent registration</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddSingleton&lt;AIAgent&gt;(sp =&gt; AgentFactory.Create(
+    sp.GetRequiredService&lt;IConfiguration&gt;(),
+    sp.GetRequiredService&lt;SchemaTools&gt;(),
+    sp.GetRequiredService&lt;AnalysisTools&gt;(),
+    sp.GetRequiredService&lt;ILoggerFactory&gt;()));</code></pre>
+              </div>
+            </li>
+          </ol>
+
+          <h2>How the pieces fit together</h2>
+          <p>The request path for <code>POST /analyze/cost</code> is:</p>
+          <ol>
+            <li>The HTTP handler creates a fresh <code>AgentSession</code>.</li>
+            <li>
+              <strong>Gather phase</strong> — <code>RunAsync()</code> lets the
+              agent call <code>CostBreakdown</code>. That builds SQL, validates
+              it through <code>SqlValidator.Validate()</code>, runs it through
+              <code>ClickHouseClient.QueryAsync()</code>, and returns
+              tab-separated rows the model reads.
+            </li>
+            <li>
+              <strong>Report phase</strong> —
+              <code>RunAsync&lt;CostBreakdownReport&gt;()</code> forces
+              structured JSON. No tool runs, because the instruction says not to
+              and the data is already in context.
+            </li>
+            <li>
+              The handler returns <code>response.Result</code>, a filled
+              <code>CostBreakdownReport</code> record, ready to serialize.
+            </li>
+          </ol>
+          <p>
+            The ClickHouse user is <code>agent_ro</code>, set to
+            <code>readonly=2</code> in
+            <code>clickhouse/users.d/agent.xml</code>. Even if the validator
+            were bypassed, the database would still refuse any write. That is
+            the two boundaries working together: the soft boundary is the
+            validator, the hard boundary is the database user.
+          </p>
+
+          <h2>Verify</h2>
+          <div class="gate">
+            <p class="gate-title">✅ Gate — do not advance until green</p>
+            <p>
+              <strong>Start the service in Testing mode</strong> (established in
+              A1 — the <code>--</code> separator is load-bearing):
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>dotnet run -- --environment Testing</code></pre>
+            </div>
+            <p>
+              <strong>Green check 1 — the default grouping is project.</strong>
+              Call the endpoint with no <code>groupBy</code> and confirm the
+              <code>Lines[].Group</code> values look like project names, not
+              model names:
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/analyze/cost \
+  -H "Content-Type: application/json" \
+  -d '{"window":"now() - INTERVAL 7 DAY"}' | jq '{total: .totalCostUsd, first_group: .lines[0].group}'</code></pre>
+            </div>
+            <p>Expected shape (values will differ):</p>
+            <div class="codewrap">
+              <pre class="code-block"><code>{
+  "summary": "...",
+  "totalCostUsd": 0.42,
+  "lines": [
+    { "group": "claudalytics", "costUsd": 0.31, "inputTokens": 120000, "outputTokens": 4500 },
+    { "group": "pansoftware",  "costUsd": 0.11, "inputTokens": 48000,  "outputTokens": 1800 }
+  ],
+  "anomalies": []
+}</code></pre>
+            </div>
+            <p>
+              If <code>lines[0].group</code> holds a model name like
+              <code>claude-haiku-4-5</code>, the default grouping is not
+              flowing. Check the handler's <code>groupBy</code> fallback.
+            </p>
+            <p>
+              <strong>Green check 2 — INSERT is refused.</strong> The validator
+              must reject write verbs before they reach ClickHouse:
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code># Ask the agent to insert something via the /chat endpoint
+curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message":"Run this SQL: INSERT INTO otel_logs VALUES (now(), '"'"'bad'"'"')"}' \
+  | jq .answer</code></pre>
+            </div>
+            <p>
+              The answer should describe a refusal that cites the validator. The
+              database is never contacted.
+            </p>
+            <p>
+              <strong
+                >Negative test — tools enabled during the structured
+                phase.</strong
+              >
+              Temporarily remove the
+              <code>"Do not call any tools."</code> instruction from the report
+              phase prompt and re-run <code>/analyze/cost</code>. You will see
+              one of two failures: the JSON schema applied to a tool-call turn,
+              producing an empty or broken <code>CostBreakdownReport</code>, or
+              an exception from the MAF runtime. Restore the instruction and
+              confirm the endpoint returns a valid record.
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ Pitfalls</span>
+            <ul>
+              <li>
+                <strong
+                  >Malformed or empty <code>CostBreakdownReport</code> from
+                  <code>/analyze/cost</code></strong
+                >
+                → tools are enabled during the structured-output phase. The
+                model tries to answer the JSON schema <em>before</em> calling
+                any tool. Split into two phases: gather first with plain
+                <code>RunAsync()</code>, then structure with
+                <code>RunAsync&lt;T&gt;()</code>.
+              </li>
+              <li>
+                <strong
+                  >Full table scans slip through on
+                  <code>otel_logs</code></strong
+                >
+                → the validator's time-predicate check only fires when
+                <code>requireTimeFilter = true</code> (the default). If you add
+                a tool that passes
+                <code>requireTimeFilter: false</code> (reserved for the
+                approval-gated unbounded tool in
+                <a href="../lesson10/index.html">C3</a>), make sure that path
+                sits behind an approval gate.
+              </li>
+              <li>
+                <strong
+                  >The agent returns a confident answer with an empty tool-call
+                  list for a cost question</strong
+                >
+                → <code>AnalysisTools</code> is not registered on the agent, or
+                the tool descriptions are missing, or the structured-output
+                phase is being used where the gather phase should be.
+              </li>
+              <li>
+                <strong
+                  ><code>FORMAT</code> keyword rejected by the validator</strong
+                >
+                → the validator blocks <code>FORMAT</code> because
+                <code>ClickHouseClient</code> appends
+                <code>FORMAT TSVWithNames</code> itself. Never put
+                <code>FORMAT</code> in a query string; the client adds it.
+              </li>
+              <li>
+                <strong
+                  >The <code>--</code> separator trap (A1 reminder)</strong
+                >
+                → running <code>dotnet run --environment Testing</code> without
+                <code>--</code> silently stays in Production and hits real-tier
+                models. Always use
+                <code>dotnet run -- --environment Testing</code>.
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              Mark lesson complete
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

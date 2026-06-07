@@ -1,0 +1,911 @@
+<!doctype html>
+<!-- lesson12/index.html — D2 · The router + menu registry -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>D2 · The router + menu registry — MAF Curriculum</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="12">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">Curriculum</a> / Module D / D2
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">
+              Lesson 12 · D2 · Module D — Composition &amp; orchestration
+            </p>
+            <h1>The router + menu registry</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★★</span>
+              <span class="badge badge--cost">Haiku</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>What you'll learn</h2>
+          <p>
+            Right now <code>POST /chat</code> sends every message straight to
+            the DataAnalyst. So "what can you do?" pays full analyst-tier cost
+            and gets a made-up answer, because the analyst has no list of real
+            capabilities. And there is no way to run a named action like the
+            weekly report from <a href="../lesson11/index.html">D1</a> without
+            the analyst guessing what you meant. You need a cheap step in front
+            that reads the message and decides where it should go.
+          </p>
+          <p>
+            The orchestrator pattern adds that step: a small classifier agent —
+            the router — in front of the more expensive analyst. In this lesson
+            you build the classifier twice. The first version (v1) works, but it
+            creates three separate lists that must stay in sync: the router's
+            prompt catalog, the hand-written menu endpoint, and the dispatch
+            switch. The second version (v2) collapses all three into one
+            <code>MenuRegistry</code> — the single source of truth — so adding a
+            capability is one entry, not three edits.
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 Teach</span>
+            <p>
+              <strong>The orchestrator pattern</strong> in MAF means a small,
+              cheap, tool-less agent that classifies intent and routes to the
+              appropriate handler — it never answers the question itself. The
+              key MAF surface is <code>RunAsync&lt;T&gt;</code> (structured
+              output), which forces the router to return a typed
+              <code>RouteDecision</code> record rather than prose. The router is
+              registered like any other agent via
+              <code>client.AsAIAgent(...)</code> and
+              <code>.AsBuilder().UseOpenTelemetry(...).Build()</code>
+              — but it is deliberately kept at the Light model tier (cheapest,
+              fastest) because it classifies, not reasons.
+            </p>
+            <p>
+              The <strong>MenuRegistry</strong> is not a MAF class — it is the
+              application pattern that tames the router. It holds a dictionary
+              of <code>MenuItem</code> records, each carrying an id, display
+              metadata, a params hint, and an <code>Invoke</code> delegate. Two
+              generated views emerge from it automatically:
+              <code>CatalogForPrompt()</code> (injected into the router's system
+              instructions) and the <code>/menu</code> JSON response (iterated
+              at the HTTP layer). The dispatch switch becomes a single
+              <code>menu.TryGet(route.TargetId)</code> call.
+            </p>
+          </div>
+
+          <h2>How the router fits the system</h2>
+          <p>
+            Every <code>POST /chat</code> turn runs through the router first.
+            The router returns one of three intents:
+          </p>
+          <ul>
+            <li>
+              <strong>chat</strong> — forward to the DataAnalyst with its full
+              session; pay Analyst-tier cost.
+            </li>
+            <li>
+              <strong>menu</strong> — return the capability catalog directly; no
+              further LLM call.
+            </li>
+            <li>
+              <strong>dispatch</strong> — invoke the named catalog item; the
+              analyst is not involved.
+            </li>
+          </ul>
+          <p>
+            The router never sees the full session history — it only sees the
+            last few user messages (a <code>RecentUserMessages</code> ring
+            buffer). This is intentional: the router's job is intent
+            classification, not conversation understanding.
+          </p>
+
+          <h2>Build it</h2>
+          <ol class="steps">
+            <li>
+              <h3>Define the typed route decision</h3>
+              <p>
+                The router must return data the <code>/chat</code> endpoint can
+                branch on, not prose. So you give it a typed shape to fill in.
+                Create <code>Models/RouteDecision.cs</code>. This is what the
+                router returns via <code>RunAsync&lt;RouteDecision&gt;</code>,
+                and the <code>/chat</code> switch (Step 5) reads
+                <code>route.Intent</code> from it. The
+                <code>[Description]</code> attributes are the schema hints that
+                guide the model to fill each field correctly. Without them the
+                model will guess.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Models/RouteDecision.cs</span>
+                </div>
+                <pre class="code-block"><code>using System.ComponentModel;
+
+namespace AiAgent.Models;
+
+/// &lt;summary&gt;
+/// The router's structured-output verdict for one user turn.
+/// &lt;/summary&gt;
+public sealed record RouteDecision(
+    [property: Description("One of: 'chat' (free-form data question or follow-up — send to the analyst), " +
+        "'menu' (user asks what the copilot can do, or wants to see the available actions), " +
+        "'dispatch' (the message clearly requests one specific catalog item).")]
+    string Intent,
+
+    [property: Description("When intent is 'dispatch': the id of the catalog item to run. Otherwise null.")]
+    string? TargetId,
+
+    [property: Description("When intent is 'dispatch': parameters extracted from the message, " +
+        "e.g. the time window like 'the last 7 days'. Otherwise null.")]
+    string? Parameters);</code></pre>
+              </div>
+              <p>
+                Note <code>TargetId</code> and <code>Parameters</code> are
+                nullable — the model should leave them null for non-dispatch
+                intents. The description constraint on <code>Intent</code> is
+                the guard against the model inventing new intent strings.
+              </p>
+            </li>
+
+            <li>
+              <h3>Build the MenuRegistry — single source of truth</h3>
+              <p>
+                The registry collapses those three hand-synced lists into one
+                source of truth. It is a plain class, not a MAF type. One entry
+                drives three consumers: the router prompt, the
+                <code>/menu</code> endpoint, and dispatch. Create
+                <code>Orchestration/MenuRegistry.cs</code>. First the
+                <code>MenuItem</code> record. Each item carries display fields
+                and an <code>Invoke</code> delegate that runs the real
+                agent/workflow and returns text:
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Orchestration/MenuRegistry.cs</span>
+                </div>
+                <pre class="code-block"><code>namespace AiAgent.Orchestration;
+
+public sealed record MenuItem(
+    string Id,
+    string Title,
+    string Description,
+    string ParamsHint,
+    string TargetKind,
+    string ModelTier,
+    Func&lt;string?, CancellationToken, Task&lt;string&gt;&gt; Invoke);</code></pre>
+              </div>
+              <p>
+                Next the registry itself. It indexes the items by id in a
+                case-insensitive dictionary, and exposes three reads — one for
+                each consumer. <code>Items</code> is read by the
+                <code>/menu</code> endpoint, <code>TryGet</code> is called by
+                the dispatch branch, and <code>CatalogForPrompt()</code> is the
+                text the router prompt interpolates:
+              </p>
+              <div class="codewrap">
+                <pre
+                  class="code-block"
+                ><code>public sealed class MenuRegistry(IEnumerable&lt;MenuItem&gt; items)
+{
+    private readonly Dictionary&lt;string, MenuItem&gt; _items =
+        items.ToDictionary(item =&gt; item.Id, StringComparer.OrdinalIgnoreCase);
+
+    public IReadOnlyCollection&lt;MenuItem&gt; Items =&gt; _items.Values;
+
+    public bool TryGet(string id, out MenuItem item) =&gt; _items.TryGetValue(id, out item!);
+
+    public string CatalogForPrompt() =&gt; string.Join("\n", _items.Values.Select(item =&gt;
+        $"- {item.Id}: {item.Description} (params: {item.ParamsHint})"));
+}</code></pre>
+              </div>
+              <p>
+                <code>TryGet</code> is case-insensitive on purpose. The router
+                might return <code>"Weekly-Report"</code> even though the id is
+                <code>"telemetry-report"</code>, and the lookup must still
+                match. <code>CatalogForPrompt()</code> renders one bullet per
+                item. The router reads this as its dispatch catalog.
+              </p>
+            </li>
+
+            <li>
+              <h3>v1: router with a hardcoded prompt catalog and switch</h3>
+              <p>
+                Compare that registry against the naive version it improves on.
+                The v1 below is shown only to expose the problem the registry
+                solves — you would not ship it. Read it, then look at where it
+                breaks.
+              </p>
+
+              <div class="tabs">
+                <div class="tab-bar">
+                  <button class="tab-btn active">
+                    v1 — naive (illustrative)
+                  </button>
+                  <button class="tab-btn">
+                    v2 — registry-driven (recommended)
+                  </button>
+                </div>
+
+                <div class="tab-panel active">
+                  <p>
+                    In v1 the router's instructions hardcode the catalog as a
+                    literal string, the menu endpoint returns a second hardcoded
+                    list, and the dispatch handler is a
+                    <code>switch</code> with one case per capability:
+                  </p>
+                  <div class="codewrap">
+                    <pre
+                      class="code-block"
+                    ><code>// v1 Router — prompt catalog hardcoded (naive approach — do not ship)
+var instructions = """
+    Classify the user message into: chat | menu | dispatch.
+    Catalog:
+    - telemetry-report: runs the full multi-agent weekly report
+    - cost-audit: detailed cost breakdown and savings advice
+    Output only the structured decision.
+    """;
+
+// v1 /menu endpoint — SECOND copy of the same list
+app.MapGet("/menu", () =&gt; Results.Ok(new {
+    items = new[] {
+        new { id = "telemetry-report", title = "Weekly report" },
+        new { id = "cost-audit",    title = "Cost audit" },
+    }
+}));
+
+// v1 /chat dispatch branch — THIRD copy
+case "dispatch":
+    return route.TargetId switch {
+        "telemetry-report" =&gt; await RunWeeklyReport(route.Parameters, ct),
+        "cost-audit"    =&gt; await RunCostAudit(route.Parameters, ct),
+        _               =&gt; Results.BadRequest(new { error = "unknown target" }),
+    };</code></pre>
+                  </div>
+                  <p>
+                    This works — until you add a capability. Then you must
+                    update the router's instructions string, the menu endpoint
+                    list, AND the dispatch switch. Three diffs, three chances to
+                    drift out of sync.
+                  </p>
+                </div>
+
+                <div class="tab-panel">
+                  <p>
+                    In v2 the registry is the only place a capability is
+                    declared. The router's instructions are generated from
+                    <code>menu.CatalogForPrompt()</code>, the menu endpoint
+                    iterates <code>menu.Items</code>, and dispatch is
+                    <code>menu.TryGet(route.TargetId)</code>. You build
+                    <code>Agents/Router.cs</code> in three parts. First the
+                    class takes the <code>MenuRegistry</code> as an argument and
+                    reads the API key, so the catalog is available when the
+                    prompt is built:
+                  </p>
+                  <div class="codewrap">
+                    <div class="code-meta">
+                      <span class="filename">Agents/Router.cs</span>
+                    </div>
+                    <pre class="code-block"><code>using AiAgent.Orchestration;
+using Anthropic;
+using Microsoft.Agents.AI;
+
+namespace AiAgent.Agents;
+
+public static class Router
+{
+    public static AIAgent Create(IConfiguration config, MenuRegistry menu, ILoggerFactory loggerFactory)
+    {
+        var apiKey = config["ANTHROPIC_API_KEY"]
+            ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not set.");
+
+        IAnthropicClient client = new AnthropicClient { ApiKey = apiKey };</code></pre>
+                  </div>
+                  <p>
+                    Next the instructions string. It interpolates
+                    <code>menu.CatalogForPrompt()</code> directly, so the prompt
+                    IS the registry, rendered as text. The three intent names
+                    here — dispatch, menu, chat — are the same strings the
+                    <code>/chat</code> switch matches on in Step 5:
+                  </p>
+                  <div class="codewrap">
+                    <pre
+                      class="code-block"
+                    ><code>        var instructions = $"""
+            You are the router for the Claudalytics copilot. Classify each user message
+            into exactly one intent:
+
+            - "dispatch": the message clearly asks to run ONE of these catalog items.
+              Set targetId to the item id and extract parameters (e.g. a time window)
+              from the message into parameters. Catalog:
+            {menu.CatalogForPrompt()}
+            - "menu": the user asks what the copilot can do, what actions/reports are
+              available, or for help/options.
+            - "chat": everything else — ad-hoc data questions, follow-ups, analysis
+              requests that do not name a catalog item. When in doubt, choose "chat".
+
+            Output only the structured decision. Never answer the question yourself.
+            """;</code></pre>
+                  </div>
+                  <p>
+                    Last, build the agent at the Light model tier and wrap it
+                    with OpenTelemetry. The router is cheap on purpose. Its
+                    spans carry the Light-tier model id, which is the proof in
+                    <code>otel_traces</code> that the cheap tier handled the
+                    turn:
+                  </p>
+                  <div class="codewrap">
+                    <pre
+                      class="code-block"
+                    ><code>        var agent = client.AsAIAgent(
+            model: ModelTiers.Light(config),
+            instructions: instructions,
+            name: "router",
+            description: "Classifies each turn into chat | menu | dispatch.");
+
+        return agent.AsBuilder()
+            .UseOpenTelemetry(AgentFactory.OtelSourceName)
+            .Build();
+    }
+}</code></pre>
+                  </div>
+                  <p>
+                    <code>IConfiguration</code> and
+                    <code>ILoggerFactory</code> come from
+                    <code>Microsoft.Extensions.*</code> implicit usings (.NET
+                    9). No new NuGet package — <code>Anthropic</code> and
+                    <code>Microsoft.Agents.AI</code> were added in A1.
+                  </p>
+                </div>
+              </div>
+            </li>
+
+            <li>
+              <h3>Register the registry and wire the first catalog item</h3>
+              <p>
+                The registry is empty until you fill it. So you register it as a
+                singleton with one starting item, then register the router after
+                it because the router takes the registry as an argument. The
+                first item is the weekly report from
+                <a href="../lesson11/index.html">D1</a> — already a
+                workflow-as-agent, so its <code>Invoke</code> delegate just
+                calls <code>ReportRunner.RunAsync</code>. This one entry is what
+                the router prompt, the <code>/menu</code> endpoint, and dispatch
+                all read.
+              </p>
+              <div class="callout callout--note">
+                <span class="callout-label">ℹ️ DI registration order</span>
+                <p>
+                  The <code>MenuRegistry</code> factory calls
+                  <code
+                    >sp.GetRequiredKeyedService&lt;AIAgent&gt;("report")</code
+                  >
+                  — this is resolved at first use (singleton factory is lazy),
+                  but keeping the registration order explicit avoids surprises
+                  during startup or in tests:
+                </p>
+                <ol>
+                  <li>
+                    Register the <code>"report"</code> keyed agent (<code
+                      >AddKeyedSingleton&lt;AIAgent&gt;("report", ...)</code
+                    >) — from D1.
+                  </li>
+                  <li>Register <code>MenuRegistry</code> (below).</li>
+                  <li>
+                    Register the <code>"router"</code> keyed agent last — it
+                    takes <code>MenuRegistry</code> as a constructor argument.
+                  </li>
+                </ol>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — DI section (before var app =
+                    builder.Build())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddSingleton&lt;MenuRegistry&gt;(sp =&gt;
+{
+    var reportAgent = sp.GetRequiredKeyedService&lt;AIAgent&gt;("report");
+
+    return new MenuRegistry(
+    [
+        new MenuItem(
+            Id: "telemetry-report",
+            Title: "Weekly report",
+            Description: "Full multi-agent telemetry report: cost, security and tooling " +
+                         "analysts run concurrently, a summarizer writes the report.",
+            ParamsHint: "time window and optionally a project, e.g. 'last 7 days, project claudalytics'",
+            TargetKind: "workflow",
+            ModelTier: "Analyst+Reasoning",
+            Invoke: async (parameters, ct) =&gt;
+            {
+                var window = string.IsNullOrWhiteSpace(parameters) ? "the last 7 days" : parameters;
+                var (report, _) = await ReportRunner.RunAsync(reportAgent, window, ct);
+                return report;
+            }),
+    ]);
+});</code></pre>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — DI section, after MenuRegistry registration
+                    (before var app = builder.Build())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddKeyedSingleton&lt;AIAgent&gt;("router", (sp, _) =&gt; Router.Create(
+    sp.GetRequiredService&lt;IConfiguration&gt;(),
+    sp.GetRequiredService&lt;MenuRegistry&gt;(),
+    sp.GetRequiredService&lt;ILoggerFactory&gt;()));</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Rewire the /chat endpoint to run through the router</h3>
+              <p>
+                This is where the classifier earns its place. The chat endpoint
+                now runs the router first, then branches on
+                <code>route.Intent</code>. The analyst path becomes the
+                <code>default</code> case. It is not thrown away — it is the
+                same direct-chat path from before, now guarded by the
+                classification step. You build this one endpoint in four parts.
+              </p>
+              <p>
+                First the handler signature and the router call. It injects the
+                keyed <code>"router"</code> agent and the <code>menu</code>,
+                gets the session, builds a small prompt from the recent
+                messages, and runs the router to get a
+                <code>RouteDecision</code>:
+              </p>
+              <p>
+                <code>[FromKeyedServices]</code> is in
+                <code>Microsoft.Extensions.DependencyInjection</code> — covered
+                by .NET 9 implicit usings. No extra <code>using</code> needed.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — endpoint section (after var app =
+                    builder.Build())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/chat", async (ChatRequest request, AIAgent agent,
+    [FromKeyedServices("router")] AIAgent router, MenuRegistry menu,
+    ConcurrentDictionary&lt;string, AgentSession&gt; sessions,
+    ConcurrentDictionary&lt;string, PendingApproval&gt; approvals,
+    RecentUserMessages recent, CancellationToken ct) =&gt;
+{
+    if (string.IsNullOrWhiteSpace(request.Message))
+        return Results.BadRequest(new { error = "message is required" });
+
+    var (sessionId, session) = await GetOrCreateSessionAsync(request.SessionId, agent, sessions, ct);
+
+    var routerPrompt = $"""
+        Recent user messages in this session:
+        {recent.Describe(sessionId)}
+
+        New user message: {request.Message}
+        """;
+    var route = (await router.RunAsync&lt;RouteDecision&gt;(routerPrompt, cancellationToken: ct)).Result;
+    recent.Add(sessionId, request.Message);
+
+    switch (route.Intent.ToLowerInvariant())
+    {</code></pre>
+              </div>
+              <p>
+                The <code>menu</code> case returns the catalog directly, with no
+                further LLM call. It reads <code>menu.Items</code> — the same
+                registry the router prompt was built from:
+              </p>
+              <div class="codewrap">
+                <pre class="code-block"><code>        case "menu":
+            return Results.Ok(new
+            {
+                sessionId,
+                kind = "menu",
+                answer = (string?)null,
+                menu = menu.Items.Select(item =&gt; new
+                {
+                    id = item.Id,
+                    title = item.Title,
+                    description = item.Description,
+                    paramsHint = item.ParamsHint,
+                }),
+                toolCalls = Array.Empty&lt;object&gt;(),
+                approvalRequest = (object?)null,
+            });</code></pre>
+              </div>
+              <p>
+                The <code>dispatch</code> case looks up the target id with
+                <code>menu.TryGet</code> and runs that item's
+                <code>Invoke</code> delegate. The
+                <a
+                  href="https://learn.microsoft.com/dotnet/csharp/language-reference/operators/patterns"
+                  >pattern-match guard</a
+                >
+                (<code
+                  >when route.TargetId is not null &amp;&amp;
+                  menu.TryGet(...)</code
+                >) means an unknown target id does not match this case at all.
+                It falls through to <code>default</code> instead of throwing:
+              </p>
+              <div class="codewrap">
+                <pre
+                  class="code-block"
+                ><code>        case "dispatch" when route.TargetId is not null &amp;&amp; menu.TryGet(route.TargetId, out var item):
+            var dispatched = await item.Invoke(route.Parameters, ct);
+            return Results.Ok(new
+            {
+                sessionId,
+                kind = "answer",
+                answer = dispatched,
+                menu = (object?)null,
+                toolCalls = new[] { new { name = item.Id, arguments = (object?)route.Parameters } },
+                approvalRequest = (object?)null,
+            });</code></pre>
+              </div>
+              <p>
+                The <code>default</code> case is the original direct-chat path.
+                It handles three things: genuine chat, a dispatch with an
+                unknown target that fell through, and any made-up intent the
+                model returns. So the endpoint never returns a 500 because of a
+                bad classification:
+              </p>
+              <div class="codewrap">
+                <pre class="code-block"><code>        default:
+            var response = await agent.RunAsync(request.Message, session, cancellationToken: ct);
+            return Results.Ok(ToChatResponse(sessionId, session, response, approvals));
+    }
+});</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Add the /menu and /menu/invoke endpoints</h3>
+              <p>
+                The same registry powers two more endpoints, so the catalog is
+                reachable without going through the router.
+                <code>GET /menu</code> is the machine-readable catalog a future
+                UI renders as action buttons.
+                <code>POST /menu/invoke</code> runs one item directly, which is
+                useful for scripted workflows or tests.
+                <code>GET /menu</code> reads <code>menu.Items</code>;
+                <code>/menu/invoke</code> uses <code>menu.TryGet</code> then the
+                item's <code>Invoke</code> delegate:
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — endpoint section (after var app =
+                    builder.Build())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapGet("/menu", (MenuRegistry menu) =&gt; Results.Ok(new
+{
+    items = menu.Items.Select(item =&gt; new
+    {
+        id = item.Id,
+        title = item.Title,
+        description = item.Description,
+        paramsHint = item.ParamsHint,
+        targetKind = item.TargetKind,
+        modelTier = item.ModelTier,
+    }),
+}));
+
+app.MapPost("/menu/invoke", async (MenuInvokeRequest request, MenuRegistry menu, CancellationToken ct) =&gt;
+{
+    if (string.IsNullOrWhiteSpace(request.ItemId) || !menu.TryGet(request.ItemId, out var item))
+        return Results.NotFound(new { error = $"unknown menu item '{request.ItemId}'" });
+
+    var answer = await item.Invoke(request.Params, ct);
+    return Results.Ok(new
+    {
+        sessionId = request.SessionId,
+        kind = "answer",
+        answer,
+        menu = (object?)null,
+        toolCalls = new[] { new { name = item.Id, arguments = (object?)request.Params } },
+        approvalRequest = (object?)null,
+    });
+});</code></pre>
+              </div>
+              <p>
+                <code>MenuInvokeRequest</code> is the request body for
+                <code>/menu/invoke</code>. It is an
+                <code>internal sealed record</code> — place it at file scope
+                after <code>app.Run();</code>, not inside the endpoint lambda:
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — file scope, after app.Run()</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>internal sealed record MenuInvokeRequest(string ItemId, string? Params, string? SessionId);</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Add a RecentUserMessages helper for router context</h3>
+              <p>
+                A follow-up like "now for last month" makes no sense to the
+                router with no history. So the router gets the last 3 user
+                messages, not the full session. This keeps router calls cheap
+                and keeps analyst-tier context out of a Light-tier call. The
+                <code>/chat</code> handler in Step 5 reads this through
+                <code>recent.Describe(sessionId)</code> when it builds the
+                router prompt, and writes to it with
+                <code>recent.Add</code> after each turn. Add this helper to
+                <code>Program.cs</code>:
+              </p>
+              <p>
+                First, register it in the DI section (before
+                <code>var app = builder.Build();</code>):
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — DI section (before var app =
+                    builder.Build())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddSingleton&lt;RecentUserMessages&gt;();</code></pre>
+              </div>
+              <p>
+                Then add the class definition at file scope after
+                <code>app.Run();</code> — like other helper types in
+                <code>Program.cs</code>, it lives at the bottom:
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — file scope, after app.Run()</span
+                  >
+                </div>
+                <pre class="code-block"><code>/// &lt;summary&gt;
+/// Last few user messages per session — given to the router so follow-ups
+/// ("now for last month") classify correctly without a full agent session.
+/// &lt;/summary&gt;
+internal sealed class RecentUserMessages
+{
+    private const int Keep = 3;
+    private readonly ConcurrentDictionary&lt;string, Queue&lt;string&gt;&gt; _store = new();
+
+    public void Add(string sessionId, string message)
+    {
+        var queue = _store.GetOrAdd(sessionId, _ =&gt; new Queue&lt;string&gt;());
+        lock (queue)
+        {
+            queue.Enqueue(message);
+            while (queue.Count &gt; Keep) queue.Dequeue();
+        }
+    }
+
+    public string Describe(string sessionId)
+    {
+        if (!_store.TryGetValue(sessionId, out var queue)) return "(none)";
+        lock (queue)
+        {
+            return queue.Count == 0 ? "(none)" : string.Join("\n", queue.Select(m =&gt; $"- {m}"));
+        }
+    }
+}</code></pre>
+              </div>
+              <p>
+                Without the recent-message context, a follow-up like "now for
+                last month" arrives to the router with no history — it cannot
+                tell whether the user is following up on a weekly report or
+                asking for a cost query. The ring buffer solves this without
+                threading the whole session through the router.
+              </p>
+            </li>
+          </ol>
+
+          <div class="callout callout--evolution">
+            <span class="callout-label">🔄 Evolution arc</span>
+            <p>
+              This lesson resolves
+              <strong>two evolution arcs simultaneously</strong>:
+            </p>
+            <ul>
+              <li>
+                <strong>Arc 4 (D2):</strong> the direct chat endpoint had no
+                classifier in front of it — it could not expose a capability
+                catalog or dispatch to named workflows. The router adds that
+                layer. The original direct-chat path is NOT thrown away — it
+                becomes the <code>default</code> branch, surviving as the chat
+                intent.
+              </li>
+              <li>
+                <strong>Arc 5 (D2):</strong> the v1 router's hardcoded prompt
+                catalog, menu list, and dispatch switch are three places that
+                drift every time a capability is added. The
+                <code>MenuRegistry</code> collapses all three into one entry.
+                Those three lists are thrown away.
+              </li>
+            </ul>
+            <p>
+              In <a href="../lesson13/index.html">D3</a> the registry grows with
+              insight specialists and more workflow items; the registry pattern
+              absorbs every new entry with zero structural change.
+            </p>
+          </div>
+
+          <h2>Verify</h2>
+          <div class="gate">
+            <p class="gate-title">✅ Gate — do not advance until green</p>
+
+            <p><strong>Start the server:</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>dotnet run -- --environment Testing</code></pre>
+            </div>
+            <p>Console must print <code>Hosting environment: Testing</code>.</p>
+
+            <p><strong>Check 1 — menu intent:</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "what can you do?"}' | jq .kind</code></pre>
+            </div>
+            <p>
+              Expected: <code>"menu"</code>. The response's
+              <code>menu</code> array must include
+              <code>"telemetry-report"</code>. No LLM analyst call was made.
+            </p>
+
+            <p><strong>Check 2 — data question routes to chat:</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "which project spent the most last week?"}' | jq '{kind, toolCalls: (.toolCalls | length)}'</code></pre>
+            </div>
+            <p>
+              Expected: <code>kind: "answer"</code> with at least one tool call
+              (the analyst ran SQL).
+            </p>
+
+            <p>
+              <strong>Check 3 — dispatch routes to the weekly report:</strong>
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "run the weekly report for the last 7 days"}' | jq '{kind, toolCalls}'</code></pre>
+            </div>
+            <p>
+              Expected: <code>kind: "answer"</code> and
+              <code>toolCalls[0].name == "telemetry-report"</code>. The answer
+              is the multi-agent report, not a direct analyst response.
+            </p>
+
+            <p><strong>Check 4 — GET /menu is registry-driven:</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s http://localhost:8124/menu | jq '.items[].id'</code></pre>
+            </div>
+            <p>
+              Expected: <code>"telemetry-report"</code> appears. Adding a second
+              registry entry makes it appear here automatically — prove this by
+              adding a dummy entry and confirming it shows up without touching
+              the endpoint.
+            </p>
+
+            <p>
+              <strong
+                >Negative test — unknown dispatch target degrades
+                gracefully:</strong
+              >
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "run the nonexistent-feature"}' | jq .kind</code></pre>
+            </div>
+            <p>
+              Expected: <code>"answer"</code> (fell through to the chat
+              analyst), NOT a 500 or <code>"error"</code>. The dispatch guard's
+              fallback to <code>default</code> is what makes this safe. If you
+              see a 500 or null kind, the pattern-match guard is not catching
+              the unknown id.
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ Pitfalls</span>
+            <ul>
+              <li>
+                <strong>Router returns plain prose instead of JSON</strong> →
+                tools are registered on the router.
+                <code>RunAsync&lt;T&gt;</code> structured output conflicts with
+                tool use in a single run — the router must be tool-less. Remove
+                any tool registrations from the router's
+                <code>AsAIAgent</code> call.
+              </li>
+              <li>
+                <strong
+                  >Dispatch always falls through to chat even for known
+                  capabilities</strong
+                >
+                → the <code>RouteDecision.TargetId</code> casing doesn't match
+                the registry key. The <code>MenuRegistry</code> constructor uses
+                <code>StringComparer.OrdinalIgnoreCase</code> — verify that
+                <code>TryGet</code> is called with the raw
+                <code>route.TargetId</code>, not a manually lowercased copy.
+              </li>
+              <li>
+                <strong
+                  >"What can you do?" is answered by the analyst with fabricated
+                  capabilities</strong
+                >
+                → the router is not wired. Confirm
+                <code>[FromKeyedServices("router")]</code> is on the /chat
+                handler parameter and the router is registered with the matching
+                key <code>"router"</code>.
+              </li>
+              <li>
+                <strong>Router prompt catalog and menu list differ</strong> → a
+                registry entry was modified directly as a string somewhere
+                outside the registry. Always add capabilities by adding a
+                <code>MenuItem</code> to the registry constructor; never
+                hardcode the same information elsewhere.
+              </li>
+              <li>
+                <strong
+                  >Follow-up messages route to menu instead of
+                  dispatch/chat</strong
+                >
+                → <code>RecentUserMessages</code> is not registered or not
+                injected. Without session context, the router sees each message
+                in isolation and misclassifies "run that for last month" as a
+                menu request.
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              Mark lesson complete
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

@@ -15,6 +15,11 @@
 # Plugin environment overrides
 plugin/.env
 
+# AI agent secrets and build output
+docker-stack/ai-agent/appsettings.Local.json
+docker-stack/ai-agent/bin/
+docker-stack/ai-agent/obj/
+
 # Docker compose overrides (user-specific port remapping)
 docker-compose.override.yaml
 docker-compose.override.yml
@@ -39,3 +44,4 @@ npm-debug.log*
 *.log
 docker-stack/hooks-server/logs/
 docker-stack/hooks-server/node_modules/
+docker-stack/ai-agent/checkpoints/

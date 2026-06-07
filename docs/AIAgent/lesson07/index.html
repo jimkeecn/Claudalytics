@@ -1,0 +1,1047 @@
+<!doctype html>
+<!-- lesson07/index.html — B4 · State that survives death -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>B4 · State that survives death — MAF Curriculum</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="07">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">Curriculum</a> / Module B / B4
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">Lesson 07 · B4 · Module B — The graph</p>
+            <h1>State that survives death: checkpoints &amp; resume</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★★</span>
+              <span class="badge badge--cost">No LLM</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>What you'll learn</h2>
+          <p>
+            An investigation can run for several minutes. It sends out many
+            ClickHouse queries, called probes. Later, in F2, it can also stop
+            and wait hours for a person to approve a step. If the process
+            crashes, restarts, or is stopped in the middle, you do not want to
+            start again from zero. Starting again means running every probe
+            again, paying for every LLM call again, and losing an approval the
+            user already gave.
+            <strong
+              >B4 makes a run survive a restart and continue from where it
+              stopped.</strong
+            >
+            That is the goal of this lesson. The rest of the page shows how to
+            do it.
+          </p>
+          <p>
+            An executor looks like a normal object. So it feels natural to
+            collect fan-in results in a field like
+            <code>private List&lt;T&gt; _collected = []</code>. This works while
+            the process keeps running. It breaks when the process restarts in
+            the middle of a run. MAF saves workflow state to disk at the end of
+            each superstep and reloads it on resume. But it cannot save an
+            instance field, because it does not know the field exists. On
+            restart the field is empty again, so the result is wrong or empty.
+            The fix is simple: do not keep state in your own fields. Put every
+            value that must survive into the workflow context. Use the private
+            scope for one executor, or a named shared scope for values that many
+            executors read. Once state lives in the context,
+            <code>FileSystemJsonCheckpointStore</code> saves and restores it for
+            you at each superstep.
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 Teach</span>
+            <p>
+              <strong>The main idea:</strong> the workflow context is the only
+              storage that lasts during a run. Everything else is temporary.
+            </p>
+            <ul>
+              <li>
+                <code
+                  >IWorkflowContext.ReadStateAsync&lt;T&gt;(key,
+                  scopeName?)</code
+                >
+                — read a value from the context. Omit <code>scopeName</code> to
+                use the executor's private scope; pass a name (e.g.
+                <code>"investigation"</code>) for a scope shared across
+                executors in this run.
+              </li>
+              <li>
+                <code
+                  >IWorkflowContext.ReadOrInitStateAsync&lt;T&gt;(key,
+                  factory)</code
+                >
+                — read, or initialise with a default if absent. Essential for
+                accumulators that start empty on the first invocation.
+              </li>
+              <li>
+                <code
+                  >IWorkflowContext.QueueStateUpdateAsync(key, value,
+                  scopeName?)</code
+                >
+                — queue a write. Writes are applied atomically at the superstep
+                boundary, then included in the checkpoint.
+              </li>
+              <li>
+                <code>FileSystemJsonCheckpointStore(DirectoryInfo)</code> —
+                persists each checkpoint as a JSON file named
+                <code>{runId}_{checkpointId}.json</code>.
+              </li>
+              <li>
+                <code>CheckpointManager.CreateJson(store, null)</code> — wraps
+                the store. Pass it to
+                <code>InProcessExecution.RunStreamingAsync</code> to enable
+                checkpointing.
+              </li>
+              <li>
+                <code
+                  >InProcessExecution.ResumeStreamingAsync(workflow,
+                  checkpointInfo, manager)</code
+                >
+                — rebuild the graph (always fresh; a <code>Workflow</code> is
+                owned by exactly one runner) and resume from the given
+                checkpoint.
+              </li>
+            </ul>
+          </div>
+
+          <h2>Why two phases: queue then apply</h2>
+          <p>
+            The runtime does not write state right away. It collects the writes
+            and applies them together at the end of the superstep. This matters
+            at a fan-in, where several probe executors send results to
+            <code>ValidatorExecutor</code> at the same time. If the writes all
+            happened at once, they could overwrite each other. When you call
+            <code>QueueStateUpdateAsync</code>, the write is only staged. It is
+            applied when the superstep closes. The checkpoint is then saved from
+            that result. This is why each executor reads with
+            <code>ReadStateAsync</code> at the start, instead of keeping state
+            in a field. The value you read is always the last saved value. It is
+            never a half-finished value from another executor.
+          </p>
+
+          <h2>Build it</h2>
+
+          <div class="callout callout--note">
+            <span class="callout-label">ℹ️</span>
+            <p>
+              This lesson reuses the B3 pipeline (<a
+                href="../lesson06/index.html"
+                >B3 — An agent is just a node</a
+              >). You already have <code>PlanExecutor</code>, three
+              <code>ProbeExecutor</code>s, <code>ValidatorExecutor</code>, and
+              <code>SynthesisExecutor</code>. The steps below refactor the
+              validator (v1 → v2) and wire
+              <code>InvestigationService</code> which handles checkpointing and
+              resume.
+            </p>
+          </div>
+
+          <ol class="steps">
+            <li>
+              <h3>Step 1 — Understand why v1 breaks on resume</h3>
+              <p>
+                Read this version of <code>ValidatorExecutor</code> carefully.
+                Every test passes. Three probes arrive, the list reaches three
+                items, and the findings go to synthesis. Now imagine the process
+                is stopped between the fan-in superstep and the synthesis
+                superstep. The checkpoint saved before the fan-in keeps the
+                probe results in context state. But the
+                <code>_collected</code> list lives only in memory. On resume the
+                executor is built again with an empty list. The count never
+                reaches 3 again, so the validator never sends anything.
+              </p>
+
+              <div class="tabs">
+                <div class="tab-bar">
+                  <button class="tab-btn active">
+                    v1 — instance field (breaks on resume)
+                  </button>
+                  <button class="tab-btn">v2 — context state (durable)</button>
+                </div>
+
+                <div class="tab-panel active">
+                  <!-- illustrative v1 — naive approach, do not ship -->
+                  <div class="codewrap">
+                    <pre
+                      class="code-block"
+                    ><code>// ❌ ValidatorExecutor v1 — illustrative (do NOT ship this)
+[SendsMessage(typeof(DeepDiveRequest))]
+[SendsMessage(typeof(Findings))]
+public sealed class ValidatorExecutor() : Executor&lt;ProbeResult&gt;("validator")
+{
+    private const int ExpectedProbes = 3;
+
+    // Instance field: invisible to the checkpoint serialiser.
+    // Works in a single process run; LOST on kill+resume.
+    private readonly List&lt;ProbeResult&gt; _collected = [];
+
+    public override async ValueTask HandleAsync(
+        ProbeResult result, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        _collected.Add(result);  // ← vanishes on restart
+
+        if (_collected.Count &lt; ExpectedProbes)
+            return;
+
+        var days = await context.ReadStateAsync&lt;int&gt;("days", scopeName: "investigation", cancellationToken);
+        var costSpike = DetectCostSpike(_collected.FirstOrDefault(p =&gt; p.Name == "cost-trend")?.Rows);
+        var findings = new Findings(days, _collected, costSpike, []);
+
+        await context.QueueStateUpdateAsync("findings", findings, scopeName: "investigation", cancellationToken);
+        await context.SendMessageAsync(findings, cancellationToken: cancellationToken);
+    }
+}</code></pre>
+                  </div>
+                </div>
+
+                <div class="tab-panel">
+                  <p>
+                    <strong
+                      >1 · Keep the list in context, not in a field.</strong
+                    >
+                    <code>ReadOrInitStateAsync</code> returns an empty list on
+                    the first call. On resume it returns the saved list from the
+                    checkpoint. After each add, the list is written back. This
+                    is why the count survives a restart. It is the main fix in
+                    v2. If fewer than three probes have arrived, the executor
+                    returns and waits.
+                  </p>
+                  <div class="codewrap">
+                    <div class="code-meta">
+                      <span class="filename"
+                        >Workflows/InvestigationExecutors.cs — ValidatorExecutor
+                        v2 (1 of 4): durable accumulate</span
+                      >
+                    </div>
+                    <pre
+                      class="code-block"
+                    ><code>[SendsMessage(typeof(DeepDiveRequest))]
+[SendsMessage(typeof(Findings))]
+public sealed class ValidatorExecutor() : Executor&lt;ProbeResult&gt;("validator")
+{
+    private const int ExpectedProbes = 3;
+
+    public override async ValueTask HandleAsync(
+        ProbeResult result, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        var collected = await context.ReadOrInitStateAsync("collected", () =&gt; new List&lt;ProbeResult&gt;(), cancellationToken)
+            ?? [];
+        collected.Add(result);
+        await context.QueueStateUpdateAsync("collected", collected, cancellationToken);
+
+        if (collected.Count &lt; ExpectedProbes)
+            return;</code></pre>
+                  </div>
+
+                  <p>
+                    <strong>2 · Build the findings.</strong> This is the same
+                    method, after the early return. <code>days</code> comes from
+                    the shared <code>"investigation"</code> scope, which
+                    <code>PlanExecutor</code> wrote in Step 2. The cost-trend
+                    rows are passed to the spike check. Probes that returned no
+                    usable numbers become notes, not data. The findings are
+                    written back into the shared scope. This lets the deep-dive
+                    branch read them later without running the validator again.
+                  </p>
+                  <div class="codewrap">
+                    <div class="code-meta">
+                      <span class="filename"
+                        >ValidatorExecutor v2 (2 of 4): build + stash
+                        findings</span
+                      >
+                    </div>
+                    <pre class="code-block"><code>        var notes = collected
+            .Where(probe =&gt; !probe.HasData)
+            .Select(probe =&gt; $"Probe '{probe.Name}' returned no usable numbers — finding rejected, not interpreted.")
+            .ToList();
+
+        var days = await context.ReadStateAsync&lt;int&gt;("days", scopeName: "investigation", cancellationToken);
+        var costSpike = DetectCostSpike(collected.FirstOrDefault(probe =&gt; probe.Name == "cost-trend")?.Rows);
+        var findings = new Findings(days, collected, costSpike, notes);
+
+        await context.QueueStateUpdateAsync("findings", findings, scopeName: "investigation", cancellationToken);</code></pre>
+                  </div>
+
+                  <p>
+                    <strong>3 · Two exits.</strong> This closes the method. If
+                    there is a cost spike, it sends a
+                    <code>DeepDiveRequest</code>
+                    to the deep-dive branch. If not, it sends the findings to
+                    synthesis.
+                  </p>
+                  <div class="codewrap">
+                    <div class="code-meta">
+                      <span class="filename"
+                        >ValidatorExecutor v2 (3 of 4): branch on spike</span
+                      >
+                    </div>
+                    <pre class="code-block"><code>        if (costSpike)
+        {
+            await context.SendMessageAsync(new DeepDiveRequest(
+                "The latest day's cost is well above the window average. Deep dive into the most expensive sessions?"),
+                cancellationToken: cancellationToken);
+            return;
+        }
+
+        await context.SendMessageAsync(findings, cancellationToken: cancellationToken);
+    }</code></pre>
+                  </div>
+
+                  <p>
+                    <strong>4 · The spike check.</strong> This is a pure
+                    function. It reads the cost-trend rows. It flags the latest
+                    day when its cost is more than 1.5 times the average of the
+                    earlier days. If there is only one day of data, it flags a
+                    cost above $5. It is kept separate from
+                    <code>HandleAsync</code> so you can unit-test it without
+                    starting a workflow.
+                  </p>
+                  <div class="codewrap">
+                    <div class="code-meta">
+                      <span class="filename"
+                        >ValidatorExecutor v2 (4 of 4): DetectCostSpike
+                        helper</span
+                      >
+                    </div>
+                    <pre
+                      class="code-block"
+                    ><code>    private static bool DetectCostSpike(string? costTrendRows)
+    {
+        if (costTrendRows is null) return false;
+
+        var costs = costTrendRows.Split('\n').Skip(1)
+            .Select(line =&gt; line.Split('\t'))
+            .Where(cells =&gt; cells.Length &gt;= 2
+                &amp;&amp; double.TryParse(cells[1], System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out _))
+            .Select(cells =&gt; double.Parse(cells[1], System.Globalization.CultureInfo.InvariantCulture))
+            .ToList();
+
+        if (costs.Count == 0) return false;
+        var last = costs[^1];
+        if (costs.Count == 1) return last &gt; 5;
+
+        var priorAverage = costs[..^1].Average();
+        return last &gt; priorAverage * 1.5;
+    }
+}</code></pre>
+                  </div>
+                </div>
+              </div>
+
+              <p>
+                The key difference: <code>collected</code> is now read from the
+                context at the start of every call. So the runtime can restore
+                it from a checkpoint if the process was stopped between
+                supersteps. No field is used.
+              </p>
+            </li>
+
+            <li>
+              <h3>
+                Step 2 — Write context state from PlanExecutor and ProbeExecutor
+              </h3>
+              <p>
+                The validator reads <code>"days"</code> from the shared
+                <code>"investigation"</code> scope. So <code>PlanExecutor</code>
+                must write that value before the fan-out. Each
+                <code>ProbeExecutor</code> also writes its raw rows to the
+                shared scope. This keeps the rows available after a resume. The
+                deep-dive branch needs the cost-trend rows. This way it does not
+                have to run the validator again.
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 Note</span>
+                <p>
+                  These are <strong>edits to existing files from B3</strong> —
+                  not new files. Open
+                  <code>Workflows/InvestigationExecutors.cs</code> and add the
+                  two <code>QueueStateUpdateAsync</code> lines shown below into
+                  the existing <code>PlanExecutor.HandleAsync</code> and
+                  <code>ProbeExecutor.HandleAsync</code> bodies. The rest of
+                  each body is unchanged from B3.
+                </p>
+                <p>
+                  The <code>ProbeJob[]</code> array already has the three SQL
+                  queries you wrote in B3 (cost-trend, tool-failures,
+                  security-events). The ClickHouse query call in
+                  <code>ProbeExecutor</code> is the same
+                  <code
+                    >await clickHouse.QueryAsync(job.Sql,
+                    cancellationToken)</code
+                  >
+                  with try/catch from B3. Only the two new
+                  <code>QueueStateUpdateAsync</code> lines are added here.
+                </p>
+              </div>
+              <p>
+                One line into each body, nothing else changed from B3. The first
+                goes into <code>PlanExecutor.HandleAsync</code> after the
+                <code>Math.Clamp</code> call and before the
+                <code>ProbeJob[]</code> array; it publishes
+                <code>"days"</code> so the validator can read it back after a
+                resume.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs —
+                    PlanExecutor.HandleAsync</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>await context.QueueStateUpdateAsync("days", days, scopeName: "investigation", cancellationToken);</code></pre>
+              </div>
+              <p>
+                The second goes into
+                <code>ProbeExecutor.HandleAsync</code> after
+                <code>rows</code> is set and before
+                <code>SendMessageAsync</code>; it keys each probe's raw rows
+                under <code>"probe:{name}"</code> in the shared scope, so the
+                deep-dive branch can read the cost-trend rows after a resume
+                without going back through the validator.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs —
+                    ProbeExecutor.HandleAsync</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>await context.QueueStateUpdateAsync($"probe:{job.Name}", rows, scopeName: "investigation", cancellationToken);</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>
+                Step 3 — Expand <code>InvestigationService</code> from B2 to add
+                checkpointing
+              </h3>
+              <p>
+                <strong
+                  >Open the existing
+                  <code>Workflows/InvestigationService.cs</code> created in
+                  B2.</strong
+                >
+                Do <em>not</em> create a new file. The B2 shell already holds
+                <code>WorkflowEventDto</code>, <code>InvestigationStatus</code>,
+                the minimal constructor, <code>StartAsync</code>,
+                <code>DriveAsync</code>, and <code>ToDto</code>. This step
+                widens it to support checkpointing and in-process approval
+                responses.
+              </p>
+              <p>
+                Why each change is needed. Checkpointing needs three things: a
+                place to save snapshots (<code>_store</code>), an object that
+                makes a snapshot at each superstep
+                (<code>_checkpointManager</code>), and a folder to hold the
+                files (<code>_checkpointDir</code>). That is why there are three
+                fields, not one. Resume must match a paused run with the exact
+                request that blocked it. A plain
+                <code>StreamingRun</code> does not hold that request. So the
+                value in <code>_pending</code> becomes a
+                <code>(Run, Request)</code> pair. The constructor now sets up
+                checkpointing. If you do not give a
+                <code>CheckpointManager</code> to the runner, nothing is saved
+                to disk. A run that saved nothing cannot resume.
+              </p>
+              <p>
+                Changes to make: add three new fields
+                (<code>_checkpointManager</code>, <code>_store</code>,
+                <code>_checkpointDir</code>), widen the
+                <code>_pending</code> dictionary's value type from
+                <code>StreamingRun</code> to the
+                <code>(StreamingRun Run, ExternalRequest Request)</code> tuple,
+                replace the no-checkpoint constructor with the checkpoint-aware
+                one, and add <code>RespondAsync</code>. The workflow factory
+                becomes
+                <code
+                  >() =&gt; InvestigationWorkflow.Build(config,
+                  clickHouse)</code
+                >
+                (upgraded from the B2 <code>ProbeWorkflow.Build</code>).
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 Note</span>
+                <p>
+                  <strong>New using required in this file:</strong>
+                  <code
+                    >using Microsoft.Agents.AI.Workflows.Checkpointing;</code
+                  >
+                  (in addition to
+                  <code>using Microsoft.Agents.AI.Workflows;</code> from B1 and
+                  <code>using System.Collections.Concurrent;</code>).
+                  <code>WorkflowEventDto</code> and
+                  <code>InvestigationStatus</code> are
+                  <strong>already defined in B2 — do not redefine them</strong>.
+                </p>
+              </div>
+              <p>
+                <strong>1 · The fields.</strong> The factory builds a fresh
+                <code>Workflow</code> per run; the three checkpoint members
+                persist and locate snapshots; <code>_pending</code> maps a run
+                id to its live run plus the request currently blocking it — that
+                pair is the tuple widening. (<code>WorkflowEventDto</code> and
+                <code>InvestigationStatus</code> are already defined in B2 — not
+                repeated here.)
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — fields</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>public sealed class InvestigationService
+{
+    private readonly Func&lt;Workflow&gt; _workflowFactory;
+    private readonly CheckpointManager _checkpointManager;
+    private readonly FileSystemJsonCheckpointStore _store;
+    private readonly DirectoryInfo _checkpointDir;
+    private readonly ILogger&lt;InvestigationService&gt; _logger;
+    private readonly ConcurrentDictionary&lt;string, (StreamingRun Run, ExternalRequest Request)&gt; _pending = new();</code></pre>
+              </div>
+
+              <p>
+                <strong>2 · The constructor wires checkpointing.</strong> Ensure
+                the checkpoint directory exists, build the file store over it,
+                wrap that in a JSON <code>CheckpointManager</code>. The workflow
+                is stored as a factory, not an instance — a
+                <code>Workflow</code> is owned by exactly one runner, so every
+                run and resume needs a fresh one.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — constructor</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    public InvestigationService(IConfiguration config, Tools.ClickHouseClient clickHouse, ILogger&lt;InvestigationService&gt; logger)
+    {
+        _logger = logger;
+        var dir = new DirectoryInfo(config["CHECKPOINT_DIR"] ?? "checkpoints");
+        dir.Create();
+        _checkpointDir = dir;
+        _store = new FileSystemJsonCheckpointStore(dir);
+        _checkpointManager = CheckpointManager.CreateJson(_store, null);
+        _workflowFactory = () =&gt; InvestigationWorkflow.Build(config, clickHouse);
+    }</code></pre>
+              </div>
+
+              <p>
+                <strong>3 · Start and in-process respond.</strong>
+                <code>StartAsync</code> runs a brand-new investigation: fresh
+                run id, streamed through the checkpoint manager so snapshots get
+                written, then drained by <code>DriveAsync</code>.
+                <code>RespondAsync</code> answers an approval while the run is
+                still live in this process — pop the pending handle, send the
+                decision, resume draining. No live handle (e.g. after a restart)
+                returns <code>null</code> so the route can redirect the caller
+                to <code>/resume</code>. Leave the class open here — Step 4 adds
+                the remaining members and the closing brace.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — StartAsync +
+                    RespondAsync</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    public async Task&lt;InvestigationStatus&gt; StartAsync(int days, CancellationToken ct)
+    {
+        var runId = Guid.NewGuid().ToString("N");
+        var run = await InProcessExecution.RunStreamingAsync(
+            _workflowFactory(), new InvestigationRequest(days), _checkpointManager, runId, ct);
+        return await DriveAsync(runId, run, [], ct);
+    }
+
+    public async Task&lt;InvestigationStatus?&gt; RespondAsync(string runId, bool approve, CancellationToken ct)
+    {
+        if (!_pending.TryRemove(runId, out var pending))
+            return null;
+
+        await pending.Run.SendResponseAsync(pending.Request.CreateResponse(new DeepDiveDecision(approve)));
+        return await DriveAsync(runId, pending.Run, [], ct);
+    }</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>
+                Step 4 — Add <code>ResumeAsync</code>, <code>DriveAsync</code>,
+                and helpers to <code>InvestigationService</code>
+              </h3>
+              <p>
+                These four members go inside the same
+                <code>InvestigationService</code> class from Step 3. Add them
+                after <code>RespondAsync</code>, then close the class brace.
+              </p>
+
+              <p>
+                <strong>1 · ResumeAsync.</strong> This loads the most recent
+                checkpoint for a run and continues it. Two things make it
+                tricky. First, the checkpoint index holds checkpoints from every
+                run, not only this one. So you filter by run id. Second, the
+                checkpoint ids are random values with no order. So you cannot
+                tell which one is newest from the id. Instead, you sort by the
+                file's last write time. If no checkpoint matches the run id,
+                return <code>null</code>
+                and the route replies 404. If one matches, drop any live handle
+                for this run, build a fresh workflow, and resume from the newest
+                checkpoint.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — ResumeAsync</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    public async Task&lt;InvestigationStatus?&gt; ResumeAsync(string runId, CancellationToken ct)
+    {
+        var mine = (await _store.RetrieveIndexAsync(runId, null))
+            .Where(checkpoint =&gt; checkpoint.SessionId == runId)
+            .Select(checkpoint =&gt; (Info: checkpoint, WrittenAt: CheckpointWrittenAt(runId, checkpoint)))
+            .OrderBy(entry =&gt; entry.WrittenAt)
+            .ToList();
+
+        if (mine.Count == 0)
+            return null;
+
+        _pending.TryRemove(runId, out _);
+        var run = await InProcessExecution.ResumeStreamingAsync(_workflowFactory(), mine[^1].Info, _checkpointManager, ct);
+        return await DriveAsync(runId, run, [new("resumed", $"from checkpoint {mine.Count} of run {runId}")], ct);
+    }</code></pre>
+              </div>
+
+              <p>
+                <strong>2 · CheckpointWrittenAt.</strong> A small helper. It
+                finds the file behind a checkpoint and returns its last write
+                time. <code>ResumeAsync</code> uses it to sort checkpoints from
+                oldest to newest.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs —
+                    CheckpointWrittenAt</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    private DateTime CheckpointWrittenAt(string runId, CheckpointInfo checkpoint)
+    {
+        var file = _checkpointDir.GetFiles($"{runId}_{checkpoint.CheckpointId}*").FirstOrDefault();
+        return file?.LastWriteTimeUtc ?? DateTime.MinValue;
+    }</code></pre>
+              </div>
+
+              <p>
+                <strong>3 · DriveAsync.</strong> This is the shared loop used by
+                <code>StartAsync</code>, <code>RespondAsync</code>, and
+                <code>ResumeAsync</code>. It reads workflow events one by one,
+                turns each one into a small status object, and keeps the final
+                report. If something throws, it logs the error and returns a
+                failed status. The approval-pause event is not handled here.
+                That part is added in F2.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — DriveAsync</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    private async Task&lt;InvestigationStatus&gt; DriveAsync(
+        string runId, StreamingRun run, List&lt;WorkflowEventDto&gt; events, CancellationToken ct)
+    {
+        string? report = null;
+        try
+        {
+            await foreach (var evt in run.WatchStreamAsync(ct))
+            {
+                var dto = ToDto(evt);
+                if (dto is not null) events.Add(dto);
+
+                if (evt is WorkflowOutputEvent output)
+                    report = output.Data?.ToString();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Investigation run {RunId} failed.", runId);
+            events.Add(new("error", ex.Message));
+            return new InvestigationStatus(runId, "failed", null, null, events);
+        }
+
+        return new InvestigationStatus(runId, report is null ? "failed" : "completed", report, null, events);
+    }</code></pre>
+              </div>
+
+              <p>
+                <strong>4 · ToDto.</strong> This maps each workflow event to a
+                small object for the API. The approval and port cases are added
+                in F2. This is the last member, so the class brace closes after
+                it.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — ToDto (then close the
+                    class)</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    private static WorkflowEventDto? ToDto(WorkflowEvent evt) =&gt; evt switch
+    {
+        WorkflowStartedEvent =&gt; new("workflow_started", null),
+        SuperStepCompletedEvent =&gt; new("superstep_completed", null),
+        ExecutorInvokedEvent invoked =&gt; new("executor_invoked", invoked.ExecutorId),
+        ExecutorCompletedEvent completed =&gt; new("executor_completed", completed.ExecutorId),
+        ExecutorFailedEvent failed =&gt; new("executor_failed",
+            $"{failed.ExecutorId}: {(failed.Data as Exception)?.GetBaseException().Message ?? failed.Data?.ToString()}"),
+        InvestigationProgressEvent progress =&gt; new("progress", progress.Message),
+        WorkflowOutputEvent =&gt; new("workflow_output", "report ready"),
+        _ =&gt; null,
+    };
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Step 5 — Expose HTTP endpoints in <code>Program.cs</code></h3>
+              <p>
+                These three routes are the full run lifecycle.
+                <code>/investigate</code> starts a run. <code>/respond</code>
+                answers an approval while the run is still running in this
+                process.
+                <code>/resume</code> loads the latest checkpoint from disk and
+                continues the run after a restart. The last one is how you
+                confirm that a run can really survive a restart.
+              </p>
+              <p>
+                Add these three routes to <code>Program.cs</code> (after
+                <code>var app = builder.Build()</code>, before
+                <code>app.Run()</code>). The <code>InvestigateRequest</code> and
+                <code>WorkflowRespondRequest</code> records go at file scope
+                after <code>app.Run()</code>, alongside the other request
+                records already in the file.
+              </p>
+              <p>
+                <strong>Routes match the spec exactly:</strong>
+                <code>/workflow/investigate</code>,
+                <code>/workflow/{runId}/respond</code>,
+                <code>/workflow/{runId}/resume</code>.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — add to DI registrations (before
+                    app.Build())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddSingleton&lt;InvestigationService&gt;();</code></pre>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — add routes (after app.Build(), before
+                    app.Run())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/workflow/investigate", async (InvestigateRequest? request, InvestigationService service, CancellationToken ct) =&gt;
+    Results.Ok(await service.StartAsync(request?.Days ?? 7, ct)));
+
+app.MapPost("/workflow/{runId}/respond", async (string runId, WorkflowRespondRequest request,
+    InvestigationService service, CancellationToken ct) =&gt;
+{
+    var status = await service.RespondAsync(runId, request.Approve, ct);
+    return status is null
+        ? Results.NotFound(new { error = "no run awaiting approval with that id (after a restart, use /resume)" })
+        : Results.Ok(status);
+});
+
+app.MapPost("/workflow/{runId}/resume", async (string runId, InvestigationService service, CancellationToken ct) =&gt;
+{
+    var status = await service.ResumeAsync(runId, ct);
+    return status is null
+        ? Results.NotFound(new { error = "no checkpoints found for that run id" })
+        : Results.Ok(status);
+});</code></pre>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — add request records at file scope (after
+                    app.Run())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>internal sealed record InvestigateRequest(int Days);
+internal sealed record WorkflowRespondRequest(bool Approve);</code></pre>
+              </div>
+            </li>
+          </ol>
+
+          <div class="callout callout--evolution">
+            <span class="callout-label">🔄 Evolution arc</span>
+            <p>
+              <strong>Why we showed a broken version first.</strong> The v1
+              <code>ValidatorExecutor</code> in Step 1 is only an example. It is
+              not part of the build — only the final v2 ships. You read the
+              simple, wrong version so you can see the exact problem. Every test
+              in one process passes. Then a stop and resume gives a wrong or
+              empty result, with no error. It is easier to remember the rule
+              after you see working code fail a resume.
+            </p>
+            <p>
+              This lesson also shows three real-world traps for the first time:
+              the store index covers all runs, the checkpoint ids have no order,
+              and a
+              <code>Workflow</code> can have only one owner. You will use all
+              three fully in
+              <a href="../lesson17/index.html"
+                >F2 — Deep investigation: HITL port + production checkpoints</a
+              >. There, the same pipeline adds a human-approval step and runs on
+              real telemetry data.
+            </p>
+          </div>
+
+          <h2>How the two scopes work together</h2>
+          <p>
+            The named scope <code>"investigation"</code> is shared. Every
+            executor in the run can read it. <code>PlanExecutor</code> writes
+            <code>"days"</code>. Each <code>ProbeExecutor</code> writes
+            <code>"probe:{name}"</code>. <code>ValidatorExecutor</code> reads
+            <code>"days"</code> and writes <code>"findings"</code>.
+            <code>DeepDiveExecutor</code> reads <code>"findings"</code> when
+            there is a cost spike. The private scope (no <code>scopeName</code>)
+            is used only for <code>"collected"</code>, the list that belongs to
+            <code>ValidatorExecutor</code> alone. Keep each value in the
+            smallest scope it needs. This stops other executors from depending
+            on data they should not use.
+          </p>
+          <div class="callout callout--note">
+            <span class="callout-label">ℹ️</span>
+            <p>
+              The snippet below
+              <strong>expands the B3 stub</strong> of
+              <code>DeepDiveExecutor</code> — it is not a new type. The B3 stub
+              already has the class declaration and the
+              <code>ReadStateAsync&lt;Findings&gt;</code> read; this lesson adds
+              the findings-reading context to the teaching. The full expensive
+              query body is added in F2 (lesson 17). <code>Findings</code>,
+              <code>DeepDiveRequest</code>, and
+              <code>DeepDiveDecision</code> are defined in B3 — do not redefine
+              them here.
+            </p>
+          </div>
+          <div class="codewrap">
+            <div class="code-meta">
+              <span class="filename"
+                >Workflows/InvestigationExecutors.cs — DeepDiveExecutor reads
+                "findings" from shared scope (expanding the B3 stub)</span
+              >
+            </div>
+            <pre
+              class="code-block"
+            ><code>public sealed class DeepDiveExecutor(ClickHouseClient clickHouse) : Executor&lt;DeepDiveDecision&gt;("deepdive")
+{
+    public override async ValueTask HandleAsync(
+        DeepDiveDecision decision, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        var findings = await context.ReadStateAsync&lt;Findings&gt;("findings", scopeName: "investigation", cancellationToken)
+            ?? new Findings(7, [], false, ["Findings state was missing."]);
+
+        if (!decision.Approve)
+        {
+            findings.ValidationNotes.Add("A cost spike was detected but the deep dive was declined by the user.");
+            await context.SendMessageAsync(findings, cancellationToken: cancellationToken);
+            return;
+        }
+    }
+}</code></pre>
+          </div>
+
+          <h2>Verify</h2>
+          <div class="gate">
+            <p class="gate-title">✅ Gate — do not advance until green</p>
+
+            <p>
+              <strong>1. Start a run and catch an early checkpoint.</strong> The
+              <code>/investigate</code> call runs to the end before it returns,
+              so you cannot stop it from the curl side. Instead, watch the
+              <code>checkpoints/</code> folder in a second terminal. The moment
+              the first checkpoint file appears, stop the server with Ctrl+C.
+              Stopping this early is the point: the newest checkpoint on disk is
+              now a partial one, saved after the plan step but before synthesis.
+              So the resume still has real work to do, and it will produce a
+              report. If you let the run finish, the only checkpoint is the
+              final one, and the resume produces nothing new.
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code># Terminal 1 — start the server, then start a run:
+dotnet run -- --environment Testing
+curl -s -X POST "http://localhost:8124/workflow/investigate" \
+  -H "Content-Type: application/json" -d '{"days":7}'
+
+# Terminal 2 — watch for the first file, then stop Terminal 1 (Ctrl+C):
+ls checkpoints/
+# A file looks like: 96d437ca5603472f8e2b571bfc70679a_&lt;guid&gt;.json
+# The runId is the part BEFORE the underscore.</code></pre>
+            </div>
+
+            <p>
+              <strong>2. Restart and resume.</strong> Start the server again.
+              Call <code>/resume</code> with the runId you copied from the file
+              name.
+            </p>
+            <div class="codewrap">
+              <pre class="code-block"><code>dotnet run -- --environment Testing
+curl -s -X POST "http://localhost:8124/workflow/&lt;runId&gt;/resume" | jq '{status, report}'</code></pre>
+            </div>
+
+            <p>
+              <strong>Expected:</strong> <code>status</code> is
+              <code>"completed"</code> and <code>report</code> is not empty. The
+              events array starts with a <code>"resumed"</code> entry, for
+              example <code>"from checkpoint 1 of run &lt;runId&gt;"</code>.
+              There is no <code>"plan"</code> executor in the resumed events.
+              The plan step was already saved in the checkpoint, so resume skips
+              it and continues from the probes onward.
+            </p>
+
+            <p>
+              <strong
+                >Negative test — unknown run id returns 404, not a
+                crash:</strong
+              >
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -o /dev/null -w "%{http_code}" \
+  -X POST "http://localhost:8124/workflow/notavalidrunid/resume"
+# Must print: 404</code></pre>
+            </div>
+
+            <p>
+              <strong>What to watch for:</strong> if you kept the v1
+              instance-field version, the resume returns
+              <code>status: "failed"</code> or a report with zero findings. The
+              validator never reaches three items. Switch to v2 (<code
+                >ReadOrInitStateAsync</code
+              >
+              and <code>QueueStateUpdateAsync</code>) and run again. The direct
+              run and the stop-and-resume run must give the same report.
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ Pitfalls</span>
+            <ul>
+              <li>
+                <strong
+                  >Resume returns empty or partial report, no error
+                  thrown</strong
+                >
+                → state is in an instance field, not the context. The executor
+                re-constructs with the field empty; the fan-in count never
+                reaches the threshold; the validator silently returns without
+                sending a message. Move accumulators to
+                <code>ReadOrInitStateAsync</code> +
+                <code>QueueStateUpdateAsync</code>.
+              </li>
+              <li>
+                <strong>"Already owned by another runner" exception</strong> →
+                the same <code>Workflow</code> object was passed to two
+                concurrent <code>RunStreamingAsync</code> calls. Use a
+                <code>Func&lt;Workflow&gt;</code> factory and call it once per
+                run/resume.
+              </li>
+              <li>
+                <strong
+                  >Resume finds no checkpoints even though the run
+                  completed</strong
+                >
+                → <code>CheckpointManager</code> was not passed to
+                <code>RunStreamingAsync</code> (the overload without a manager
+                silently skips checkpointing). Confirm the constructor call:
+                <code>CheckpointManager.CreateJson(_store, null)</code>.
+              </li>
+              <li>
+                <strong>Resume loads the WRONG run's state</strong> → the store
+                index is global across all runs. If you query it without
+                filtering to the target <code>runId</code> and sorting by file
+                write time, you may pick a checkpoint from a different run.
+                Always filter by <code>checkpoint.SessionId == runId</code>
+                before selecting the latest.
+              </li>
+              <li>
+                <strong
+                  >An instance field passes every single-process test</strong
+                >
+                → this is the trap. A green CI run does not mean the code is
+                safe on resume. The failure only happens when the process is
+                stopped between supersteps. Every in-process test runs in one
+                session, so it never hits this case.
+              </li>
+              <li>
+                <strong>Resume of a finished run gives no report</strong> → you
+                stopped the server too late, so the only checkpoint on disk is
+                the final one. Resume loads it, finds no remaining work, and
+                returns no report. Stop at the first checkpoint file instead, so
+                the resume still has the synthesis step left to run.
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              Mark lesson complete
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

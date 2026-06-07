@@ -1,0 +1,510 @@
+<!doctype html>
+<!-- lesson00/index.html — Infrastructure setup.
+     Do NOT hand-write the sidebar or prev/next: site.js generates them from manifest.js. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>L0 · Infrastructure setup — MAF Curriculum</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="00">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">Curriculum</a> / Setup / L0
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">Lesson 00 · L0 · Setup</p>
+            <h1>
+              Infrastructure setup: project, packages, secrets, and the Testing
+              ritual
+            </h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★</span>
+              <span class="badge badge--cost">No LLM</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>What you'll learn</h2>
+          <p>
+            You are building Claudalytics Copilot, a .NET agent that answers
+            questions about LLM cost and ClickHouse telemetry. If you run every
+            lesson with the default settings, each gate calls a real Claude
+            model at full price and your secrets risk getting committed to git.
+            This lesson sets up one boot command that pins every model to the
+            cheap Haiku tier and loads your API key from a gitignored file, so
+            every later lesson stays cheap, repeatable, and safe.
+          </p>
+          <p>
+            The scaffold you build here carries through all 19 lessons: the
+            <code>.csproj</code> with exact package versions, the two-file
+            <code>appsettings</code> split (base config + Testing overrides),
+            the <code>appsettings.Local.json</code> gitignore pattern for your
+            Anthropic API key, and the verification step every later gate
+            depends on. Docker is deferred to the capstone (<a
+              href="../lesson19/index.html"
+              >CAP</a
+            >); for now you run bare <code>dotnet run</code>.
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 Teach</span>
+            <p>
+              MAF projects depend on three packages that must be version-pinned
+              together:
+              <strong>Microsoft.Agents.AI</strong>,
+              <strong>Microsoft.Agents.AI.Anthropic</strong>, and
+              <strong>Microsoft.Agents.AI.Workflows</strong>. The Anthropic
+              provider package is on a preview track and its suffix
+              (<code>-preview.YYMMDD.N</code>) changes weekly — pinning it
+              prevents silent upgrades that break the API. OpenTelemetry
+              packages are pinned separately.
+            </p>
+            <p>
+              The <strong>Testing environment</strong> is not a test project. It
+              is an ASP.NET named environment loaded by
+              <code>appsettings.Testing.json</code>. You activate it by passing
+              <code>--environment Testing</code> to the host at startup. It does
+              two things in this curriculum. First, it overrides all three model
+              tiers to <code>claude-haiku-4-5</code>, so every gate costs a
+              fraction of a cent. Second, it raises the
+              <code>Microsoft.Agents.AI</code> log namespace to
+              <code>Debug</code>, which you need to observe compaction in
+              <a href="../lesson15/index.html">E2</a>. You use this environment
+              for every lesson except one real-tier check in
+              <a href="../lesson13/index.html">D3</a>.
+            </p>
+            <p>
+              The <strong><code>--</code> separator matters</strong>. Without
+              it, dotnet reads <code>--environment Testing</code> as its own
+              flag, not as an argument to your program. The host then stays in
+              Production with no error. E2 calls out this trap again. It is the
+              most common reason a working compaction provider produces no Debug
+              logs.
+            </p>
+          </div>
+
+          <h2>Build it</h2>
+          <ol class="steps">
+            <li>
+              <h3>Create the solution and web project</h3>
+              <p>
+                The Copilot is a web service, so you start with an ASP.NET
+                minimal-API project. Create a solution with one project
+                targeting .NET 9. Use the project name <code>AiAgent</code>: all
+                later lessons import types from the
+                <code>AiAgent.*</code> namespace, so the name must match.
+              </p>
+              <div class="codewrap">
+                <pre class="code-block"><code>dotnet new sln -n Claudalytics
+dotnet new web -n AiAgent -f net9.0
+dotnet sln add AiAgent/AiAgent.csproj</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Pin packages in AiAgent.csproj</h3>
+              <p>
+                The agent code in later lessons imports three MAF packages:
+                <code>Microsoft.Agents.AI</code> (the agent runtime),
+                <code>Microsoft.Agents.AI.Anthropic</code> (the Claude
+                provider), and <code>Microsoft.Agents.AI.Workflows</code> (the
+                multi-step workflow engine). The three OpenTelemetry packages
+                send traces to ClickHouse so the Copilot can later read its own
+                telemetry. Replace the generated
+                <code>AiAgent.csproj</code> with the pinned versions below.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">AiAgent/AiAgent.csproj</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>&lt;Project Sdk="Microsoft.NET.Sdk.Web"&gt;
+
+  &lt;PropertyGroup&gt;
+    &lt;TargetFramework&gt;net9.0&lt;/TargetFramework&gt;
+    &lt;Nullable&gt;enable&lt;/Nullable&gt;
+    &lt;ImplicitUsings&gt;enable&lt;/ImplicitUsings&gt;
+    &lt;NoWarn&gt;$(NoWarn);MAAI001;MEAI001&lt;/NoWarn&gt;
+  &lt;/PropertyGroup&gt;
+
+  &lt;ItemGroup&gt;
+    &lt;PackageReference Include="Microsoft.Agents.AI" Version="1.9.0" /&gt;
+    &lt;PackageReference Include="Microsoft.Agents.AI.Anthropic" Version="1.9.0-preview.260603.1" /&gt;
+    &lt;PackageReference Include="Microsoft.Agents.AI.Workflows" Version="1.9.0" /&gt;
+    &lt;PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.15.3" /&gt;
+    &lt;PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.15.3" /&gt;
+    &lt;PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.15.2" /&gt;
+  &lt;/ItemGroup&gt;
+
+&lt;/Project&gt;</code></pre>
+              </div>
+              <p>
+                The <code>NoWarn</code> line suppresses two build warnings,
+                <code>MAAI001</code> and <code>MEAI001</code>. Both are
+                expected. The compaction and chat-reducer APIs are marked
+                experimental in MAF 1.9.0 and M.E.AI 10.5. You use them in
+                <a href="../lesson15/index.html">E2</a>, so you suppress the
+                warnings now to keep later lesson output clean.
+              </p>
+              <p>
+                The Anthropic provider package is on a preview track. Its suffix
+                (<code>-preview.YYMMDD.N</code>) changes every week. Pinning the
+                exact version stops a silent upgrade from breaking the API. Then
+                restore:
+              </p>
+              <div class="codewrap">
+                <pre
+                  class="code-block"
+                ><code>dotnet restore AiAgent/AiAgent.csproj</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Write the base appsettings.json</h3>
+              <p>
+                This file holds non-secret configuration that is safe to commit:
+                the listen URL, the log levels, and the three model tiers. A
+                <code>ModelTiers</code> helper, added later in
+                <a href="../lesson13/index.html">D3</a>, reads the tier names
+                (<code>Light</code>, <code>Analyst</code>,
+                <code>Reasoning</code>). Every lesson that creates an agent
+                reads its model name from this file.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">AiAgent/appsettings.json</span>
+                </div>
+                <pre class="code-block"><code>{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*",
+  "Urls": "http://localhost:8124",
+  "CLICKHOUSE_URL": "http://localhost:8123",
+  "CLICKHOUSE_USER": "agent_ro",
+  "Models": {
+    "Light": "claude-haiku-4-5",
+    "Analyst": "claude-sonnet-4-6",
+    "Reasoning": "claude-opus-4-8"
+  }
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Write appsettings.Testing.json</h3>
+              <p>
+                This file is the cost and safety net for every lesson. It
+                overrides all three tiers to Haiku and enables Debug-level
+                logging for the MAF namespace. It is committed — it contains no
+                secrets and must be predictable on every machine.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">AiAgent/appsettings.Testing.json</span>
+                </div>
+                <pre class="code-block"><code>{
+  "Models": {
+    "Light": "claude-haiku-4-5",
+    "Analyst": "claude-haiku-4-5",
+    "Reasoning": "claude-haiku-4-5"
+  },
+  "Logging": {
+    "LogLevel": {
+      "Microsoft.Agents.AI": "Debug"
+    }
+  }
+}</code></pre>
+              </div>
+              <p>
+                Why Haiku for all three tiers? The tiers exist so that in
+                production, a router turn uses a Light model and a deep-analysis
+                turn uses Reasoning. In Testing you want all turns equally cheap
+                — and equally observable — without changing any call sites. The
+                override is total: any lesson code that reads
+                <code>config["Models:Reasoning"]</code> gets Haiku in Testing.
+              </p>
+            </li>
+
+            <li>
+              <h3>Create the gitignored secrets file</h3>
+              <p>
+                Add <code>appsettings.Local.json</code> to
+                <code>.gitignore</code> first, then create the file. Never
+                reverse this order — the secrets file must not appear in git
+                even for a moment.
+              </p>
+              <div class="codewrap">
+                <pre
+                  class="code-block"
+                ><code># In the repo root .gitignore — add this line:
+**/appsettings.Local.json</code></pre>
+              </div>
+              <p>Then create the file (do not commit it):</p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >AiAgent/appsettings.Local.json ← gitignored</span
+                  >
+                </div>
+                <pre class="code-block"><code>{
+  "ANTHROPIC_API_KEY": "sk-ant-…your-key-here…"
+}</code></pre>
+              </div>
+              <p>
+                The Anthropic provider package reads
+                <code>ANTHROPIC_API_KEY</code> from configuration at startup. In
+                <code>Program.cs</code>, load the secrets file last, after all
+                other sources, so its key wins over any environment variable
+                with the same name. Keep this file secrets-only:
+                <code>ANTHROPIC_API_KEY</code> and an optional
+                <code>CLICKHOUSE_PASSWORD</code>.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >AiAgent/Program.cs (excerpt — full file in step 6)</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>var builder = WebApplication.CreateBuilder(args);
+
+builder.Configuration.AddJsonFile(
+    "appsettings.Local.json", optional: true, reloadOnChange: true);</code></pre>
+              </div>
+              <p>
+                The file is <code>optional: true</code> so CI does not fail when
+                the file is absent. On a CI machine there is no local file. CI
+                injects the key as an environment variable instead.
+              </p>
+            </li>
+
+            <li>
+              <h3>Add a health endpoint and boot the app</h3>
+              <p>
+                Add a minimal health endpoint so you have something to curl
+                before any agents exist. This is the entire
+                <code>Program.cs</code> for this lesson.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">AiAgent/Program.cs</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>var builder = WebApplication.CreateBuilder(args);
+
+builder.Configuration.AddJsonFile(
+    "appsettings.Local.json", optional: true, reloadOnChange: true);
+
+var app = builder.Build();
+
+app.MapGet("/healthz", () => Results.Ok(new { status = "ok" }));
+
+app.Run();</code></pre>
+              </div>
+              <p>Now launch with the Testing environment flag:</p>
+              <div class="codewrap">
+                <pre class="code-block"><code>cd AiAgent
+dotnet run -- --environment Testing</code></pre>
+              </div>
+              <p>
+                The <code>--</code> is not optional. It tells
+                <code>dotnet</code> that everything after it is an argument to
+                your program, not to the <code>dotnet run</code> command itself.
+                Without it, <code>--environment</code> is parsed by dotnet, not
+                by ASP.NET's host builder, and your process silently starts in
+                the <code>Production</code> environment.
+              </p>
+            </li>
+          </ol>
+
+          <h2>How the environment stack loads</h2>
+          <p>
+            ASP.NET loads configuration sources in this order, with each later
+            source winning over earlier ones:
+          </p>
+          <ol>
+            <li><code>appsettings.json</code> — base values (committed)</li>
+            <li>
+              <code>appsettings.{Environment}.json</code> — environment overlay;
+              in Testing this is
+              <code>appsettings.Testing.json</code> (committed)
+            </li>
+            <li>Environment variables — CI injects secrets here</li>
+            <li>
+              <code>appsettings.Local.json</code> — developer secrets, loaded
+              last (gitignored)
+            </li>
+          </ol>
+          <p>
+            The result: on your machine the Anthropic API key comes from
+            <code>appsettings.Local.json</code>; in CI it comes from an env var;
+            in both cases the key wins over any prior source. Model tiers are
+            overridden to Haiku by
+            <code>appsettings.Testing.json</code> whenever the environment is
+            <code>Testing</code>.
+          </p>
+
+          <h2>Verify</h2>
+          <div class="gate">
+            <p class="gate-title">✅ Gate — do not advance until green</p>
+
+            <p>
+              <strong
+                >Green check 1 — environment confirmed in console
+                output.</strong
+              >
+            </p>
+            <p>
+              When you run <code>dotnet run -- --environment Testing</code>, the
+              ASP.NET host writes its environment to the console during startup.
+              Look for this line:
+            </p>
+            <div class="codewrap">
+              <pre class="code-block"><code>info: Microsoft.Hosting.Lifetime[0]
+      Hosting environment: Testing</code></pre>
+            </div>
+            <p>
+              If you see <code>Production</code> instead, you forgot the
+              <code>--</code> separator.
+            </p>
+
+            <p><strong>Green check 2 — health endpoint responds.</strong></p>
+            <div class="codewrap">
+              <pre class="code-block"><code>curl http://localhost:8124/healthz
+# Expected: {"status":"ok"}</code></pre>
+            </div>
+
+            <p><strong>Negative test — the silent Production trap.</strong></p>
+            <p>
+              Run <em>without</em> the separator and observe the difference:
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code># Wrong — dotnet consumes --environment Testing itself
+dotnet run --environment Testing
+
+# The console will print:
+#   Hosting environment: Production
+# appsettings.Testing.json is NOT loaded.
+# All model tiers stay at the production values (Sonnet, Opus).
+# Any gate that checks for Haiku spans will fail.</code></pre>
+            </div>
+            <p>
+              This is the most important negative test in the curriculum. Every
+              lesson's Verify section assumes you are in Testing. If you are
+              not, the Haiku-pinned cost guarantee is gone and Debug logs for
+              compaction (E2) are suppressed.
+            </p>
+          </div>
+
+          <div class="callout callout--note">
+            <span class="callout-label">ℹ️ Note</span>
+            <p>
+              <strong>Docker is deferred.</strong> You run the backend directly
+              with <code>dotnet run</code> throughout the curriculum. You will
+              <em>not</em> need Docker until the capstone (<a
+                href="../lesson19/index.html"
+                >CAP</a
+              >). Until then, run
+              <code>dotnet run -- --environment Testing</code> directly; the
+              ClickHouse URL in <code>appsettings.json</code> points to
+              localhost for when you do have a local instance, but the setup
+              lessons do not require it.
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ Pitfalls</span>
+            <ul>
+              <li>
+                <strong
+                  >Console says
+                  <code>Hosting environment: Production</code></strong
+                >
+                → you ran <code>dotnet run --environment Testing</code> without
+                the <code>--</code> separator. Dotnet consumed the flag; your
+                program never saw it. Always:
+                <code>dotnet run -- --environment Testing</code>.
+              </li>
+              <li>
+                <strong
+                  >Build error <code>MAAI001</code> or
+                  <code>MEAI001</code></strong
+                >
+                → the <code>NoWarn</code> line is missing from
+                <code>.csproj</code>. These are expected warnings for the
+                experimental compaction API; suppress them now so they do not
+                pollute lesson output in E2.
+              </li>
+              <li>
+                <strong>Restore fails or preview package not found</strong> →
+                the <code>Microsoft.Agents.AI.Anthropic</code> version suffix is
+                time-stamped (<code>1.9.0-preview.260603.1</code>). If NuGet
+                cannot resolve it, check the
+                <a
+                  href="https://www.nuget.org/packages/Microsoft.Agents.AI.Anthropic"
+                  target="_blank"
+                  rel="noopener"
+                  >NuGet listing</a
+                >
+                for the latest <code>1.9.0-preview.*</code> and update the
+                version string. Pin to whatever you resolve; do not use
+                <code>*</code> wildcards.
+              </li>
+              <li>
+                <strong>API key not found at runtime</strong> → confirm
+                <code>appsettings.Local.json</code> exists in the
+                <em>project</em> directory (next to
+                <code>AiAgent.csproj</code>), not the solution root.
+                <code>AddJsonFile</code> resolves relative to the content root,
+                which is the project directory when running with
+                <code>dotnet run</code>.
+              </li>
+              <li>
+                <strong
+                  ><code>appsettings.Local.json</code> appears in
+                  <code>git status</code></strong
+                >
+                → the <code>.gitignore</code> entry was added after the file was
+                already tracked. Run
+                <code>git rm --cached AiAgent/appsettings.Local.json</code> to
+                untrack it without deleting it, then commit the
+                <code>.gitignore</code> change.
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              Mark lesson complete
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

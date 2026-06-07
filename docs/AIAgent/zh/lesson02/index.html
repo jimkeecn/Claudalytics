@@ -1,0 +1,511 @@
+<!doctype html>
+<!-- lesson02/index.html — A2: Multi-turn memory (sessions) -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>A2 · 多轮记忆 — MAF 课程</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="02">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">课程</a> / 模块 A / A2
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">第 02 课 · A2 · 模块 A — Hello agent</p>
+            <h1>多轮记忆（会话（session））</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★</span>
+              <span class="badge badge--cost">Haiku</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>你将学到什么</h2>
+          <p>
+            <a href="../lesson01/index.html">A1</a> 的 Claudalytics Copilot
+            每次只能单独回答一个问题。用户问完"本周最贵的项目"再追问"那前一天呢"，
+            模型却没有上一轮的记忆，追问就失败了。修复办法是 session。
+            <code>AgentSession</code> 为一次对话承载完整的消息历史，服务端把这些
+            session 放进一个 store，让模型在每次请求时都能看到之前的轮次。
+          </p>
+          <p>
+            本课你会加一个服务端 session store，以客户端回传的 session id
+            为键。你会验证：相同 id 给模型上下文，缺失 id 则给一张白纸。注意一个
+            已知局限：store 只存在进程内存里，服务器重启后所有 session
+            都会丢失。 本课接受这一点；<a href="../lesson07/index.html">B4</a>
+            会让它持久化。
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 讲解</span>
+            <h3>AgentSession 与会话（session）存储</h3>
+            <p>
+              MAF 把一个对话线程表示为
+              <code>AgentSession</code>。你通过调用
+              <code>agent.CreateSessionAsync()</code> 来创建它，然后把它传入
+              后续每一次
+              <code>agent.RunAsync(message, session)</code> 调用。会话会累积
+              所有消息 —— 用户轮次、助手回复、工具调用（tool call）与结果 ——
+              因此模型在 后续的每一轮都能看到自己之前的推理。
+            </p>
+            <p>
+              会话对象本身只存活在内存中。要让它在多次 HTTP 请求之间存活下来，
+              你需要一个服务端存储。本项目使用一个注册为单例的
+              <code>ConcurrentDictionary&lt;string, AgentSession&gt;</code>，
+              以客户端在追问请求中回传的字符串 id 作为键。
+            </p>
+            <p>本课涉及的关键 API 面：</p>
+            <ul>
+              <li>
+                <code>agent.CreateSessionAsync(CancellationToken)</code> ——
+                分配一个新的空线程。
+              </li>
+              <li>
+                <code
+                  >agent.RunAsync(string message, AgentSession session,
+                  ...)</code
+                >
+                —— 在线程内运行一轮。
+              </li>
+              <li>
+                <code>ConcurrentDictionary&lt;string, AgentSession&gt;</code> ——
+                服务端存储。
+              </li>
+              <li>
+                <code>GetOrCreateSessionAsync</code> —— 辅助模式：按 id 查找，
+                或新建一个。
+              </li>
+            </ul>
+          </div>
+
+          <h2>为什么这两个概念必须分清</h2>
+          <p>
+            人们很容易以为"会话（session） id
+            <em>就是</em>会话"。其实不是。<strong>会话 id</strong>
+            是你的服务器凭空生成的一个字符串（一个 GUID），客户端
+            在第一次响应中收到它，并必须在追问时回传。<strong>会话</strong>
+            则是一个持有消息列表的、活生生的内存对象。你的存储把两者映射起来。
+            如果你跳过了存储，每个请求都会创建一个全新的会话，每次追问看起来都
+            像第一个问题 —— 模型没有任何记忆。
+          </p>
+
+          <h2>动手构建</h2>
+          <ol class="steps">
+            <li>
+              <h3>把会话（session）存储注册为单例</h3>
+              <p>
+                store 是每个 <code>/chat</code> 请求读写的唯一位置，必须是全应用
+                共享的单一实例，所以注册为单例。第 4 步的处理器会注入这同一个
+                字典。在 <code>Program.cs</code> 的 DI 块中、agent 注册之后、
+                <code>var app = builder.Build();</code> 之前加一行。
+                <code>ConcurrentDictionary</code> 对并发请求安全，普通
+                <code>Dictionary</code> 会产生竞态。
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 说明</span>
+                <p>
+                  <strong>本步骤所需的 using</strong> —— 如果
+                  <code>Program.cs</code> 顶部还没有，请加上：
+                </p>
+                <ul>
+                  <li>
+                    <code>using System.Collections.Concurrent;</code> ——
+                    <code>ConcurrentDictionary&lt;,&gt;</code>
+                  </li>
+                  <li>
+                    <code>using Microsoft.Agents.AI;</code> ——
+                    <code>AgentSession</code>（如果你在
+                    <a href="../lesson01/index.html">A1</a>
+                    中已经加过，这里就已经有了）
+                  </li>
+                </ul>
+                <p>
+                  <strong>无需新增 NuGet 包</strong> —— 这两个类型都随你在 A1
+                  中安装的 <code>Microsoft.Agents.AI</code> 一起提供。
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddSingleton&lt;ConcurrentDictionary&lt;string, AgentSession&gt;&gt;();</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>给聊天请求模型加上 sessionId</h3>
+              <p>
+                第 3 步的辅助方法靠 <code>SessionId</code> 来决定复用还是新建
+                session，所以请求模型要带上它。客户端每次追问都回传它；缺失则表示
+                "开始一段新对话"。让这个 record 保持精简。
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 说明</span>
+                <p>
+                  <strong
+                    >用这个版本替换你 A1 中的
+                    <code>ChatRequest</code> record</strong
+                  >
+                  —— 不要声明两次。把它放在 <code>Program.cs</code> 中
+                  <code>app.Run();</code> 之后的文件作用域处。
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — 文件作用域，app.Run() 之后</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>internal sealed record ChatRequest(string Message, string? SessionId);</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>编写 GetOrCreate 辅助方法</h3>
+              <p>
+                把"查找或新建"的逻辑集中在一处，让第 4 步的
+                <code>/chat</code> 处理器保持精简。它做两件事：先定 session
+                id（客户端发来的，或新的 GUID），再在 store 里找对应的
+                <code>AgentSession</code>，找不到就 新建并存起来。它返回 id 和
+                session，供第 4 步使用。
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 说明</span>
+                <p>
+                  <strong>放置位置：</strong>这是一个文件作用域的
+                  <code>static</code> 局部函数。把它放在
+                  <code>Program.cs</code> 中 <code>app.Run();</code>
+                  <em>之后</em> —— 放在 <code>app.Run()</code> 之前会触发
+                  CS8803（"顶层语句 必须位于命名空间和类型声明之前"）。
+                </p>
+                <p>
+                  <strong>累积状态：</strong>你 A1 的
+                  <code>Program.cs</code> 必须已经有
+                  <code>using Microsoft.Agents.AI;</code>（用于
+                  <code>AgentSession</code>）和
+                  <code>using System.Collections.Concurrent;</code>（在上面 第 1
+                  步加入）。
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — 文件作用域 static，app.Run() 之后</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>static async Task&lt;(string SessionId, AgentSession Session)&gt; GetOrCreateSessionAsync(
+    string? requestedSessionId, AIAgent agent,
+    ConcurrentDictionary&lt;string, AgentSession&gt; sessions, CancellationToken ct)
+{
+    var sessionId = string.IsNullOrWhiteSpace(requestedSessionId)
+        ? Guid.NewGuid().ToString("N")
+        : requestedSessionId;
+
+    if (!sessions.TryGetValue(sessionId, out var session))
+    {
+        session = await agent.CreateSessionAsync(ct);
+        sessions[sessionId] = session;
+    }
+
+    return (sessionId, session);
+}</code></pre>
+              </div>
+              <p>
+                有两个细节值得注意：<code>Guid.NewGuid().ToString("N")</code>
+                会生成一个紧凑的 32 位十六进制字符串、不带连字符 —— 在 curl
+                里很容易复制。另外，<code>TryGetValue</code> 加上一次锁外赋值
+                在这里是安全的，因为 <code>ConcurrentDictionary</code> 的读取
+                路径是无锁的；两个针对同一 id 的并发首次请求之间的竞态是无害的
+                （其中一个会话胜出，另一个被 GC 回收）。
+              </p>
+            </li>
+
+            <li>
+              <h3>把辅助方法接入 /chat 端点（endpoint）</h3>
+              <p>
+                这一步把第 1 到 3 步串起来。处理器注入第 1 步的 store，调用第 3
+                步的辅助方法，把返回的 session 传入
+                <code>RunAsync</code>，让模型 看到完整历史，并在响应中回传
+                session id。客户端下一轮再带上它， 对话就被串联起来。
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 说明</span>
+                <p>
+                  <strong
+                    >用这个版本替换你 A1 的 <code>/chat</code> 处理器</strong
+                  >
+                  —— 不要把同一个
+                  <code>MapPost("/chat", ...)</code> 路由注册两次，否则应用会
+                  在启动时抛异常。把它放在
+                  <code>var app = builder.Build();</code> 之后的端点块中。
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — 端点块，var app = builder.Build() 之后</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/chat", async (ChatRequest request, AIAgent agent,
+    ConcurrentDictionary&lt;string, AgentSession&gt; sessions,
+    CancellationToken ct) =&gt;
+{
+    if (string.IsNullOrWhiteSpace(request.Message))
+        return Results.BadRequest(new { error = "message is required" });
+
+    var (sessionId, session) = await GetOrCreateSessionAsync(
+        request.SessionId, agent, sessions, ct);
+
+    var response = await agent.RunAsync(request.Message, session, cancellationToken: ct);
+
+    return Results.Ok(new
+    {
+        sessionId,
+        answer = response.Text,
+    });
+});</code></pre>
+              </div>
+              <p>
+                上面的端点为了清晰起见做了精简。完整的 <code>Program.cs</code>
+                还接入了路由器（router）、审批（approval）请求以及
+                <code>RecentUserMessages</code> —— 这些会在后续课程中引入
+                （路由器见 <a href="../lesson12/index.html">D2</a>，审批见
+                <a href="../lesson10/index.html">C3</a>）。
+              </p>
+            </li>
+
+            <li>
+              <h3>如何端到端接入</h3>
+              <p>
+                最终的 <code>Program.cs</code> 里，同步的 <code>/chat</code> 和
+                流式（streaming）的 <code>/chat/stream</code> 用同一套模式。流式
+                路径先调用 <code>GetOrCreateSessionAsync</code>，再把 session
+                传入
+                <code>agent.RunStreamingAsync</code>；无论阻塞还是流式，session
+                都是同一个对象、同一份历史。<code>/chat/stream</code> 是为将来的
+                Angular 聊天前端保留的。
+              </p>
+              <div class="callout callout--note">
+                <span class="callout-label">ℹ️ 仅预览 —— 现在先不要添加</span>
+                <p>
+                  下面的代码片段仅供理解定位之用。它引用了三个
+                  <strong>要到后续课程才会定义</strong>的类型：
+                </p>
+                <ul>
+                  <li>
+                    <code>PendingApproval</code> —— 在
+                    <a href="../lesson03/index.html">A3</a>
+                    中引入（工具审批（approval）的 HITL）。
+                  </li>
+                  <li>
+                    <code>SseEvent</code> —— 在
+                    <a href="../lesson03/index.html">A3</a> 中引入（SSE
+                    辅助方法）。
+                  </li>
+                  <li>
+                    <code>ToolApprovalRequestContent</code> —— 在
+                    <a href="../lesson10/index.html">C3</a> 中引入（审批内容
+                    类型）。
+                  </li>
+                </ul>
+                <p>
+                  <strong
+                    >现在不要把这个片段复制进你的
+                    <code>Program.cs</code>。</strong
+                  >
+                  等你学到 A3 时再完整添加 <code>/chat/stream</code>。会话存储
+                  的接入（<code>GetOrCreateSessionAsync</code>）才是 A2 中唯一
+                  需要新增的部分。
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/chat/stream", async (HttpContext context, AIAgent agent,
+    ConcurrentDictionary&lt;string, AgentSession&gt; sessions,
+    ConcurrentDictionary&lt;string, PendingApproval&gt; approvals, CancellationToken ct) =&gt;
+{
+    var request = await context.Request.ReadFromJsonAsync&lt;ChatRequest&gt;(ct);
+    if (request is null || string.IsNullOrWhiteSpace(request.Message))
+    {
+        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+        return;
+    }
+
+    var (sessionId, session) = await GetOrCreateSessionAsync(
+        request.SessionId, agent, sessions, ct);
+
+    context.Response.Headers.ContentType = "text/event-stream";
+    context.Response.Headers.CacheControl = "no-cache";
+    await SseEvent.WriteAsync(context.Response, "session", new { sessionId }, ct);
+
+    // ... token/tool_call/done events follow — see A3 for the full implementation
+});</code></pre>
+              </div>
+              <p>
+                <code>session</code> 事件最先发出，这样一个在没有先前 id 的
+                情况下打开流的客户端，就能在任何 token 到来之前立即获知它的新
+                id。
+              </p>
+            </li>
+          </ol>
+
+          <h2>验证</h2>
+          <div class="gate">
+            <p class="gate-title">✅ 关卡（gate） — 未变绿前不要前进</p>
+
+            <p>
+              <strong>以 Testing 模式启动服务器</strong>（那个
+              <code>--</code> 分隔符至关重要 —— 完整解释见
+              <a href="../lesson01/index.html">A1</a>）：
+            </p>
+
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>dotnet run -- --environment Testing</code></pre>
+            </div>
+
+            <p>
+              <strong
+                >第 1 轮 —— 问一个对时间敏感的问题，并捕获会话 id：</strong
+              >
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What was the most expensive project this week?"}' \
+  | tee /tmp/t1.json</code></pre>
+            </div>
+            <p>
+              从响应中复制 <code>sessionId</code> 的值 —— 它是一个 32 位的
+              十六进制字符串。
+            </p>
+
+            <p>
+              <strong>第 2 轮 —— 用同一个 id 发起一个相对性的追问：</strong>
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "And the day before that?", "sessionId": "PASTE_SESSION_ID_HERE"}' \
+  | tee /tmp/t2.json</code></pre>
+            </div>
+            <p>
+              响应必须引用第 1 轮中相同的项目名称，或者连贯地承接日期的变化 ——
+              这证明模型同时看到了两条消息。如果答案令人困惑或答非所问，
+              说明会话没有被串联起来。
+            </p>
+
+            <p>
+              <strong>反向测试 —— 相同的追问但不带会话 id：</strong>
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "And the day before that?"}' \
+  | tee /tmp/t3.json</code></pre>
+            </div>
+            <p>
+              这必须产生一个困惑、含糊或反问式的回应 —— 模型对"前一天"
+              没有任何上下文（context）。如果它依然连贯作答，说明你的
+              <code>GetOrCreateSessionAsync</code> 复用了错误的会话 （检查：当
+              <code>requestedSessionId</code> 为 null 时，你是否
+              生成了一个全新的 GUID，而不是退回到某个固定的键）。
+            </p>
+
+            <p>
+              <strong>存储检查 —— 确认两个会话彼此独立：</strong>
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code># The response from /tmp/t1.json and /tmp/t3.json must have DIFFERENT sessionId values.
+jq -r .sessionId /tmp/t1.json
+jq -r .sessionId /tmp/t3.json</code></pre>
+            </div>
+            <p>
+              两个不同的 GUID 证明：每个无会话 id 的请求都创建了自己的存储
+              条目。
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ 常见坑</span>
+            <ul>
+              <li>
+                <strong>会话存储被注册为 scoped 或 transient</strong>
+                → 每个请求都会注入一个全新的字典；所有已存储的会话对下一个
+                请求都是不可见的。请把字典注册为
+                <code>Singleton</code>。
+              </li>
+              <li>
+                <strong
+                  >向 <code>RunAsync</code> 传入 <code>null</code> 会话</strong
+                >
+                → MAF 会在内部创建一个匿名的临时会话；响应没有可返回的 id，
+                而且即便字典里有正确的条目，每个请求仍是一张白纸。务必把
+                取出或新建的 <code>AgentSession</code>
+                显式传入。
+              </li>
+              <li>
+                <strong>当 <code>SessionId</code> 缺失时不生成 id</strong>
+                → 每个无会话 id 的请求都会复用同一个 <code>""</code> 或
+                <code>null</code>
+                键，从而用每个用户的消息污染同一个共享会话。当调用方省略 id
+                时，无条件地生成一个全新的 GUID。
+              </li>
+              <li>
+                <strong>会话存储无法在重启之间持久化（durable）</strong>
+                → <code>ConcurrentDictionary</code> 只存活在进程内存中。在
+                <code>dotnet run</code> 重启之后，所有会话都会消失。对本课
+                而言这是预期行为；持久化将在
+                <a href="../lesson07/index.html">B4</a>
+                中通过检查点（checkpoint）来解决。
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              标记本课完成
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

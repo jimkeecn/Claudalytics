@@ -1,0 +1,770 @@
+<!doctype html>
+<!-- lesson10/index.html — C3: Tool-level human approval -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>C3 · Tool-level human approval — MAF Curriculum</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="10">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">Curriculum</a> / Module C / C3
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">
+              Lesson 10 · C3 · Module C — The product
+            </p>
+            <h1>Tool-level human approval</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★</span>
+              <span class="badge badge--cost">Haiku</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>What you'll learn</h2>
+          <p>
+            One tool in this agent is dangerous. It can scan the whole
+            <code>otel_logs</code> table with no time filter. That query reads
+            millions of rows and can run for minutes. It costs real money on a
+            request the user may never have meant to run. If the agent fires it
+            on its own, you only find out after the bill.
+            <strong>C3 puts that one tool behind a human approval gate.</strong>
+            When the model picks the dangerous tool, the run pauses and waits.
+            No SQL touches the database until a person approves it.
+          </p>
+          <p>
+            The mechanism is a wrapper. You register the tool inside
+            <code>ApprovalRequiredAIFunction</code> instead of as a plain
+            function. When the model selects the wrapped tool, the framework
+            does not run it. It emits a
+            <code>ToolApprovalRequestContent</code> and pauses the run. Your
+            server stores that pending approval under a generated id and returns
+            <code>kind: "approval"</code> to the caller. A second endpoint,
+            <code>POST /chat/approve</code>, resolves the decision. Approve
+            replays the tool call into the same session. Deny injects a refusal
+            and the agent answers without running anything. Each approval is
+            used exactly once. A second use returns 404. The gate lives at the
+            single tool, not at the workflow level. The workflow-level gate is
+            <a href="../lesson17/index.html">F2's <code>RequestPort</code></a
+            >.
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 Teach</span>
+            <h3>The three parts of tool-level HITL</h3>
+            <p>
+              MAF builds tool approval from three pieces that work together.
+            </p>
+            <ul>
+              <li>
+                <code>ApprovalRequiredAIFunction</code> — the wrapper you pass
+                instead of a raw <code>AIFunction</code>. When the model selects
+                the wrapped tool, the framework emits a
+                <code>ToolApprovalRequestContent</code> and pauses the run. It
+                does not run the function.
+              </li>
+              <li>
+                <code>ToolApprovalRequestContent</code> — the pause signal. It
+                holds the original <code>ToolCall</code>, which is the function
+                call the model wanted to make. It also has a
+                <code>CreateResponse(approved, reason)</code> method. You use
+                that method to build the reply that resumes the run.
+              </li>
+              <li>
+                <code>agent.RunAsync(reply, session)</code> — how you send the
+                decision back. You call <code>RunAsync</code> with one
+                <code
+                  >ChatMessage(ChatRole.User,
+                  [pending.Request.CreateResponse(approved, reason)])</code
+                >
+                on the same session. If approved, the framework runs the tool
+                and continues. If denied, it feeds the refusal reason and the
+                agent answers without running the tool.
+              </li>
+            </ul>
+            <p>
+              You need no new library package. Everything here is in the
+              packages <a href="../lesson09/index.html">C2</a> already added.
+              The MAF chat-client layer enforces the whole contract. It
+              intercepts the tool call before it reaches your code.
+            </p>
+          </div>
+
+          <h2>Why an unbounded scan needs a gate</h2>
+          <p>
+            In <a href="../lesson08/index.html">C1</a> you added
+            <code>SqlValidator</code>. It requires a
+            <code>Timestamp</code> filter on every <code>otel_logs</code> query,
+            because <code>otel_logs</code> is the big table. That is the right
+            default. A full scan of a large log table is expensive and usually
+            not needed. But sometimes a user really does need an all-time total.
+            An example is "which project has spent the most since the
+            beginning?". The answer is a second tool named
+            <code>RunUnboundedSql</code>. It skips the time-filter rule. To stay
+            safe, it sits behind a human decision. The model can propose it. A
+            human must approve it.
+          </p>
+
+          <h2>Build it</h2>
+          <ol class="steps">
+            <li>
+              <h3>Add the unbounded SQL tool to SchemaTools</h3>
+              <p>
+                This is the tool the gate protects. The agent reads its
+                description and calls it only when a question needs a full scan.
+                Add it inside the existing
+                <code
+                  >public sealed class SchemaTools(ClickHouseClient
+                  clickHouse)</code
+                >, next to <code>RunSql</code>. No new usings are needed.
+              </p>
+              <p>
+                <code>RunUnboundedSql</code> is the same as
+                <code>RunSql</code> with one change. It calls
+                <code
+                  >SqlValidator.Validate(query, requireTimeFilter: false)</code
+                >, which turns off the time-filter rule. Every other guard still
+                runs: read-only verbs, single statement, and the auto-added
+                limit.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Tools/SchemaTools.cs</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>[Description("Executes a read-only SELECT WITHOUT the otel_logs time-filter requirement. "
+           + "Use ONLY when a full-table scan is genuinely needed. "
+           + "Every call requires explicit human approval before it runs.")]
+public async Task&lt;string&gt; RunUnboundedSql(
+    [Description("The SELECT (or WITH ... SELECT) query to execute, "
+               + "may scan otel_logs without a Timestamp filter.")] string query)
+{
+    try
+    {
+        var sql = SqlValidator.Validate(query, requireTimeFilter: false);
+        return await clickHouse.QueryAsync(sql);
+    }
+    catch (Exception ex)
+    {
+        return $"QUERY FAILED: {ex.Message}";
+    }
+}</code></pre>
+              </div>
+              <p>
+                You do not change <code>SqlValidator</code> here. Its
+                <code>Validate</code> method already takes the
+                <code>requireTimeFilter</code> flag from C1. You only call it
+                with <code>false</code>. The read-only regex guards are the same
+                ones both tools use.
+              </p>
+              <p>
+                For reference, the <code>Validate</code> method is shown below
+                as it stands after C1. The class is
+                <code>public static partial class SqlValidator</code> with
+                <code>[GeneratedRegex]</code> partial methods
+                (<code>SelectOrWith</code>, <code>DeniedKeywords</code>,
+                <code>HasLimit</code>, <code>TargetsOtelLogs</code>). Keep it
+                partial and keep those methods as they are. Nothing in this
+                snippet is new; it is here so you can see what the
+                <code>false</code> path skips.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Tools/SqlValidator.cs — Validate method (unchanged from
+                    C1)</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>public static string Validate(string query, bool requireTimeFilter = true)
+{
+    var sql = query.Trim().TrimEnd(';').Trim();
+
+    if (sql.Contains(';'))
+        throw new ArgumentException("Only a single SQL statement is allowed.");
+
+    if (!SelectOrWith().IsMatch(sql))
+        throw new ArgumentException("Only SELECT (or WITH ... SELECT) queries are allowed.");
+
+    var denied = DeniedKeywords().Match(sql);
+    if (denied.Success)
+        throw new ArgumentException($"Keyword '{denied.Value}' is not allowed. This tool is read-only; FORMAT is appended automatically.");
+
+    if (requireTimeFilter &amp;&amp; TargetsOtelLogs().IsMatch(sql)
+        &amp;&amp; !sql.Contains("Timestamp", StringComparison.OrdinalIgnoreCase))
+        throw new ArgumentException(
+            "Queries against otel_logs must filter on Timestamp (it is a large table). " +
+            "Add e.g. WHERE Timestamp &gt;= now() - INTERVAL 1 DAY.");
+
+    if (!HasLimit().IsMatch(sql))
+        sql += $" LIMIT {DefaultLimit}";
+
+    return sql;
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>
+                Wrap the tool with <code>ApprovalRequiredAIFunction</code>
+              </h3>
+              <p>
+                This step is where the gate is set. The wrapper is what makes
+                the framework pause instead of run. Register
+                <code>RunUnboundedSql</code> inside
+                <code>new ApprovalRequiredAIFunction(...)</code>. Leave every
+                other tool as a plain <code>AIFunctionFactory.Create</code>
+                call. The agent still sees the tool by name. Only the framework
+                knows it is gated.
+              </p>
+              <p>
+                Replace the <code>Tools = [...]</code> block inside
+                <code>AgentFactory.Create</code> with the block below.
+                <code>using Microsoft.Agents.AI;</code> is already present from
+                A1. <code>ApprovalRequiredAIFunction</code> lives in that same
+                namespace, so no new NuGet package is needed.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Agents/AgentFactory.cs</span>
+                </div>
+                <pre class="code-block"><code>Tools =
+[
+    AIFunctionFactory.Create(tools.GetSchema),
+    AIFunctionFactory.Create(tools.RunSql),
+    new ApprovalRequiredAIFunction(AIFunctionFactory.Create(tools.RunUnboundedSql)),
+    AIFunctionFactory.Create(tools.ListProjects),
+    AIFunctionFactory.Create(tools.ListRecentSessions),
+    AIFunctionFactory.Create(analysis.CostBreakdown),
+    AIFunctionFactory.Create(analysis.SessionDeepDive),
+],</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Store pending approvals in a shared dictionary</h3>
+              <p>
+                The pause and the decision happen in two separate HTTP requests.
+                Between them, the server has to remember the paused approval.
+                When a <code>ToolApprovalRequestContent</code> appears in the
+                agent's response, you save it here. The
+                <code>/chat/approve</code> endpoint in Step 5 reads it back by
+                id. Register a singleton
+                <code>ConcurrentDictionary&lt;string, PendingApproval&gt;</code>
+                in DI. <code>using System.Collections.Concurrent;</code> is
+                already present from A2.
+              </p>
+              <p>
+                Add the <code>AddSingleton</code> call in the DI block of
+                <code>Program.cs</code>, after the existing
+                <code>ConcurrentDictionary&lt;string, AgentSession&gt;</code>
+                registration. The <code>PendingApproval</code> record is
+                file-scoped. Place it after <code>app.Run();</code>, next to the
+                other record declarations (<code>ChatRequest</code>,
+                <code>ApproveRequest</code>, and so on).
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — DI block (before app.Build())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddSingleton&lt;ConcurrentDictionary&lt;string, PendingApproval&gt;&gt;();</code></pre>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — file scope after app.Run()</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>internal sealed record PendingApproval(
+    string SessionId,
+    AgentSession Session,
+    ToolApprovalRequestContent Request);</code></pre>
+              </div>
+              <p>
+                The record carries the <code>AgentSession</code> on purpose. The
+                approval decision must continue the same conversation. If you
+                drop the session here, the agent resumes with no history and no
+                context, and the answer is wrong. The session is the MAF
+                multi-turn memory unit introduced in
+                <a href="../lesson02/index.html">A2</a>.
+              </p>
+            </li>
+
+            <li>
+              <h3>Detect the pause signal in the chat response builder</h3>
+              <p>
+                This is the read side of the pause. After each
+                <code>agent.RunAsync</code> call, you scan the response for a
+                <code>ToolApprovalRequestContent</code>. If one is there, the
+                run is paused, so you store the approval and tell the caller to
+                ask a human. If none is there, the response is a normal answer.
+                The caller is the front end, which switches on
+                <code>kind</code>: <code>"approval"</code> shows an approve or
+                deny prompt, <code>"answer"</code> shows the reply as before.
+              </p>
+              <p>
+                <code>ToChatResponse</code> and <code>StoreApproval</code> are
+                file-scope <code>static</code> helper methods. Place them after
+                <code>app.Run();</code>, next to
+                <code>GetOrCreateSessionAsync</code> (already present from A2).
+                Both the <code>/chat</code> endpoint and the
+                <code>/chat/approve</code> endpoint in Step 5 call them.
+              </p>
+              <p>
+                The first method, <code>ToChatResponse</code>, flattens the
+                response into its content items. It collects any tool calls for
+                display. It then looks for the first
+                <code>ToolApprovalRequestContent</code>. If it finds one, it
+                calls <code>StoreApproval</code> to save the pending approval
+                and gets back an id. The returned object sets
+                <code>kind</code> to <code>"approval"</code> when an approval
+                request was found, and <code>"answer"</code> otherwise.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — file scope after app.Run()</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>static object ToChatResponse(string sessionId, AgentSession session, AgentResponse response,
+    ConcurrentDictionary&lt;string, PendingApproval&gt; approvals)
+{
+    var contents = response.Messages.SelectMany(message =&gt; message.Contents).ToList();
+
+    var toolCalls = contents.OfType&lt;FunctionCallContent&gt;()
+        .Select(call =&gt; new { name = call.Name, arguments = (object?)call.Arguments })
+        .ToList();
+
+    var approvalRequest = contents.OfType&lt;ToolApprovalRequestContent&gt;()
+        .Select(approval =&gt;
+        {
+            var call = approval.ToolCall as FunctionCallContent;
+            return new
+            {
+                approvalId = StoreApproval(approvals, sessionId, session, approval),
+                toolName = call?.Name,
+                arguments = call?.Arguments,
+            };
+        })
+        .FirstOrDefault();
+
+    return new
+    {
+        sessionId,
+        kind = approvalRequest is null ? "answer" : "approval",
+        answer = response.Text,
+        menu = (object?)null,
+        toolCalls,
+        approvalRequest,
+    };
+}</code></pre>
+              </div>
+              <p>
+                The second method, <code>StoreApproval</code>, is the write
+                side. It makes a new id, saves the
+                <code>PendingApproval</code> under that id in the shared
+                dictionary, and returns the id. That id is what the front end
+                later sends to <code>/chat/approve</code>.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — file scope after app.Run()</span
+                  >
+                </div>
+                <pre class="code-block"><code>static string StoreApproval(
+    ConcurrentDictionary&lt;string, PendingApproval&gt; approvals,
+    string sessionId, AgentSession session, ToolApprovalRequestContent request)
+{
+    var approvalId = Guid.NewGuid().ToString("N");
+    approvals[approvalId] = new PendingApproval(sessionId, session, request);
+    return approvalId;
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Return the approval shape from <code>/chat</code></h3>
+              <p>
+                The <code>/chat</code> endpoint from
+                <a href="../lesson02/index.html">A2</a> returns only
+                <code>{ sessionId, answer }</code>, so when a run pauses for
+                approval the caller never sees an <code>approvalId</code> and
+                cannot show an approve prompt. Inject the
+                <code>approvals</code> dictionary and return
+                <code>ToChatResponse</code> instead, so a paused run comes back
+                as <code>kind: "approval"</code> with the stored id.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — replace the /chat endpoint</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/chat", async (ChatRequest request, AIAgent agent,
+    ConcurrentDictionary&lt;string, AgentSession&gt; sessions,
+    ConcurrentDictionary&lt;string, PendingApproval&gt; approvals,
+    CancellationToken ct) =&gt;
+{
+    if (string.IsNullOrWhiteSpace(request.Message))
+        return Results.BadRequest(new { error = "message is required" });
+
+    var (sessionId, session) = await GetOrCreateSessionAsync(
+        request.SessionId, agent, sessions, ct);
+
+    var response = await agent.RunAsync(request.Message, session, cancellationToken: ct);
+
+    return Results.Ok(ToChatResponse(sessionId, session, response, approvals));
+});</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Add the <code>POST /chat/approve</code> endpoint</h3>
+              <p>
+                This endpoint is the write side of the decision. It reads the
+                pending approval that Step 4 stored. It removes the entry with
+                <code>TryRemove</code>, so the id can be used only once. It then
+                builds a reply with <code>CreateResponse</code> and calls
+                <code>RunAsync</code> on the same session to resume the paused
+                run. The session comes from <code>pending.Session</code>, so the
+                agent keeps the full conversation.
+              </p>
+              <p>
+                Add the <code>app.MapPost</code> call in the route block of
+                <code>Program.cs</code>, after the existing
+                <code>/chat</code> endpoint. The
+                <code>ApproveRequest</code> record is file-scoped. Place it
+                after <code>app.Run();</code>, next to
+                <code>ChatRequest</code> and the other record declarations.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs — route block</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/chat/approve", async (ApproveRequest request, AIAgent agent,
+    ConcurrentDictionary&lt;string, PendingApproval&gt; approvals, CancellationToken ct) =&gt;
+{
+    if (string.IsNullOrWhiteSpace(request.ApprovalId)
+        || !approvals.TryRemove(request.ApprovalId, out var pending))
+        return Results.NotFound(new { error = "unknown or already-handled approvalId" });
+
+    var reply = new ChatMessage(ChatRole.User,
+        [pending.Request.CreateResponse(request.Approved, request.Reason ?? "")]);
+
+    var response = await agent.RunAsync(reply, pending.Session, cancellationToken: ct);
+    return Results.Ok(ToChatResponse(pending.SessionId, pending.Session, response, approvals));
+});</code></pre>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — file scope after app.Run()</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>internal sealed record ApproveRequest(string ApprovalId, bool Approved, string? Reason);</code></pre>
+              </div>
+              <p>
+                <code>TryRemove</code> is what makes an approval one-time. The
+                dictionary is the approval registry. The moment the id is
+                removed, it is gone. A second call with the same id finds
+                nothing and returns the <code>NotFound</code> branch.
+              </p>
+            </li>
+
+            <li>
+              <h3>
+                Handle the pause signal in the streaming endpoint (optional)
+              </h3>
+              <p>
+                The streaming endpoint sends tokens as they arrive, so it needs
+                its own pause handling. When a
+                <code>ToolApprovalRequestContent</code> shows up in an update,
+                the run is paused. Instead of stopping, you store the approval
+                and emit an <code>approval_request</code> SSE event. The browser
+                client reads that event and shows the approve or deny prompt.
+                This step is optional. Do it only if you wired the streaming
+                endpoint from <a href="../lesson03/index.html">A3</a> /
+                <a href="../lesson09/index.html">C2</a>.
+              </p>
+              <p>
+                Add the two new <code>case</code> blocks to the existing
+                <code>switch</code> inside the <code>/chat/stream</code>
+                <code>await foreach</code> loop (introduced in A3). Also add
+                <code
+                  >ConcurrentDictionary&lt;string, PendingApproval&gt;
+                  approvals</code
+                >
+                to the handler's parameter list so the singleton is injected.
+                The updated handler signature is below, followed by the full
+                <code>await foreach</code> body.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — /chat/stream handler signature (add the
+                    approvals parameter)</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/chat/stream", async (HttpContext context, AIAgent agent,
+    ConcurrentDictionary&lt;string, AgentSession&gt; sessions,
+    ConcurrentDictionary&lt;string, PendingApproval&gt; approvals, CancellationToken ct) =&gt;</code></pre>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — /chat/stream await foreach (replace existing
+                    body)</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>await foreach (var update in agent.RunStreamingAsync(request.Message, session, cancellationToken: ct))
+{
+    foreach (var content in update.Contents)
+    {
+        switch (content)
+        {
+            case FunctionCallContent call:
+                await SseEvent.WriteAsync(context.Response, "tool_call",
+                    new { name = call.Name, arguments = call.Arguments }, ct);
+                break;
+            case ToolApprovalRequestContent approval:
+                var approvalId = StoreApproval(approvals, sessionId, session, approval);
+                var approvalCall = approval.ToolCall as FunctionCallContent;
+                await SseEvent.WriteAsync(context.Response, "approval_request",
+                    new { approvalId, toolName = approvalCall?.Name, arguments = approvalCall?.Arguments }, ct);
+                break;
+        }
+    }
+
+    if (!string.IsNullOrEmpty(update.Text))
+        await SseEvent.WriteAsync(context.Response, "token", new { text = update.Text }, ct);
+}</code></pre>
+              </div>
+            </li>
+          </ol>
+
+          <h2>How the two-endpoint flow works end-to-end</h2>
+          <p>The whole interaction is two HTTP calls.</p>
+          <ol>
+            <li>
+              <strong>First call</strong> — <code>POST /chat</code> with a
+              question that needs an unbounded scan. The model picks
+              <code>RunUnboundedSql</code>. The framework sees the
+              <code>ApprovalRequiredAIFunction</code> wrapper and pauses. It
+              emits a <code>ToolApprovalRequestContent</code>. Your server
+              stores it and returns
+              <code
+                >{ kind: "approval", approvalRequest: { approvalId: "...",
+                toolName: "RunUnboundedSql", arguments: {...} } }</code
+              >. The run is suspended. No SQL has run yet.
+            </li>
+            <li>
+              <strong>Second call</strong> —
+              <code>POST /chat/approve</code> with the
+              <code>approvalId</code> and <code>approved: true/false</code>. The
+              endpoint removes the pending entry, so the id is now used up. It
+              calls <code>CreateResponse</code> and resumes
+              <code>RunAsync</code> on the same session. If approved, the tool
+              runs and the agent answers. If denied, the framework feeds a
+              refusal and the agent answers without running anything.
+            </li>
+          </ol>
+
+          <div class="callout callout--build">
+            <span class="callout-label">🔧 Note</span>
+            <p>
+              The approval registry lives in process memory. After a server
+              restart, pending approvals are gone, and the client gets a 404.
+              For production you would save the approval queue to a backing
+              store such as a database or Redis. The in-memory approach is fine
+              for this lesson. Durability across restarts is the subject of
+              <a href="../lesson17/index.html">F2</a>'s production checkpoints.
+            </p>
+          </div>
+
+          <h2>Verify</h2>
+          <div class="gate">
+            <p class="gate-title">✅ Gate — do not advance until green</p>
+
+            <p><strong>Step 1 — trigger the approval request.</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:5200/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Across the entire otel_logs history with no time filter at all, what is the timestamp of the very first event ever recorded?"}' \
+  | jq '{kind, approvalRequest}'</code></pre>
+            </div>
+            <p>Expected output — the run pauses, no SQL has run yet:</p>
+            <div class="codewrap">
+              <pre class="code-block"><code>{
+  "kind": "approval",
+  "approvalRequest": {
+    "approvalId": "&lt;some-id&gt;",
+    "toolName": "RunUnboundedSql",
+    "arguments": { "query": "SELECT ..." }
+  }
+}</code></pre>
+            </div>
+
+            <p><strong>Step 2 — approve and verify execution.</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:5200/chat/approve \
+  -H "Content-Type: application/json" \
+  -d '{"approvalId": "&lt;some-id&gt;", "approved": true}' \
+  | jq '{kind, answer}'</code></pre>
+            </div>
+            <p>
+              Expected: <code>kind: "answer"</code> with a substantive reply
+              giving the timestamp of the earliest event in
+              <code>otel_logs</code>.
+            </p>
+
+            <p><strong>Step 3 — deny path.</strong></p>
+            <p>
+              Send a fresh <code>/chat</code> question that triggers the
+              approval, then deny it:
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:5200/chat/approve \
+  -H "Content-Type: application/json" \
+  -d '{"approvalId": "&lt;new-id&gt;", "approved": false, "reason": "too expensive"}' \
+  | jq '{kind, answer}'</code></pre>
+            </div>
+            <p>
+              Expected: <code>kind: "answer"</code>, and the answer text
+              gracefully acknowledges the refusal (e.g., "I wasn't able to run
+              the full scan — the request was denied"). The agent does not crash
+              or return an empty reply.
+            </p>
+
+            <p>
+              <strong
+                >Negative test — second use of a consumed id returns
+                404.</strong
+              >
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:5200/chat/approve \
+  -H "Content-Type: application/json" \
+  -d '{"approvalId": "&lt;the-id-you-already-used&gt;", "approved": true}' \
+  | jq .error</code></pre>
+            </div>
+            <p>
+              Expected:
+              <code>"unknown or already-handled approvalId"</code> with HTTP
+              404. This confirms approvals are one-shot.
+            </p>
+
+            <p><strong>Negative test — bogus id is also 404.</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:5200/chat/approve \
+  -H "Content-Type: application/json" \
+  -d '{"approvalId": "doesnotexist", "approved": true}' \
+  | jq .error</code></pre>
+            </div>
+            <p>Expected: same 404 error body.</p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ Pitfalls</span>
+            <ul>
+              <li>
+                <strong>Approval stored without its session</strong> → the agent
+                resumes with no conversation history, so the answer has no
+                grounding or is wrong. Always store the
+                <code>AgentSession</code> in the pending approval record.
+              </li>
+              <li>
+                <strong
+                  ><code>kind: "answer"</code> but the answer is empty or "I
+                  cannot", even though you approved</strong
+                >
+                → the approval was replayed on the wrong session, a new one.
+                Confirm you take the session from <code>pending.Session</code>,
+                not from <code>GetOrCreateSessionAsync</code> at decision time.
+              </li>
+              <li>
+                <strong
+                  >Second use of an approval id does not return 404</strong
+                >
+                → you saved the approval with a plain dictionary set (<code
+                  >approvals[id] = ...</code
+                >) inside the approve endpoint, instead of removing it with
+                <code>TryRemove</code>. The approval stays and can be reused.
+              </li>
+              <li>
+                <strong
+                  >Normal tool calls stop working after the wrapper</strong
+                >
+                → you wrapped a tool that should not be gated. Only
+                <code>RunUnboundedSql</code> should be wrapped. Every other tool
+                stays a plain <code>AIFunctionFactory.Create</code> call.
+              </li>
+              <li>
+                <strong
+                  >The agent never selects <code>RunUnboundedSql</code></strong
+                >
+                → the tool name and description do not set it apart from
+                <code>RunSql</code>. The model will pick the simpler tool. Make
+                the description say "WITHOUT the time-filter requirement" and
+                "full-table scan", so the model knows when to use it.
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              Mark lesson complete
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

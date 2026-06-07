@@ -1,0 +1,574 @@
+<!doctype html>
+<!-- lesson13/index.html — D3: Agent-as-tool + model tiering -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>D3 · Agent-as-tool + model tiering — MAF Curriculum</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="13">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">Curriculum</a> / Module D / D3
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">
+              Lesson 13 · D3 · Module D — Composition &amp; orchestration
+            </p>
+            <h1>Agent-as-tool + model tiering</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★</span>
+              <span class="badge badge--cost">Haiku + 1 real-tier check</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>What you'll learn</h2>
+          <p>
+            This lesson fixes two real problems in this app. First problem: the
+            telemetry-report workflow you built in
+            <a href="../lesson11/index.html">D1</a> can only run from its own
+            <code>/report</code> endpoint. A user chatting with the DataAnalyst
+            cannot ask for the report mid-conversation. You fix this by wrapping
+            the whole report workflow as one callable tool on the DataAnalyst,
+            so the LLM itself decides when to run it (agent-as-tool,
+            <code>AsAIFunction</code>). Second problem: there is no cheap way to
+            run the gates. Every model id already flows through
+            <code>ModelTiers</code> (from
+            <a href="../lesson01/index.html">A1</a>), but with no Testing
+            override each gate hits the production tier — Analyst is Sonnet,
+            Reasoning is Opus — so the test loop costs real money. You fix this
+            by adding an <code>appsettings.Testing.json</code> that collapses
+            all three tiers to Haiku, so one
+            <code>--environment Testing</code> switch makes every agent cheap
+            with no code change.
+          </p>
+          <p>
+            The first move handles <em>who calls whom</em>; the second handles
+            <em>which model runs the call</em>. By the end of this lesson every
+            agent in the project reads its model from one helper, and the
+            telemetry-report workflow is callable mid-conversation without a
+            dedicated dispatch step.
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 Teach</span>
+            <p>
+              <strong>Agent-as-tool (<code>AsAIFunction</code>)</strong>: any
+              <code>AIAgent</code> exposes a
+              <code>.AsAIFunction(AIFunctionFactoryOptions)</code> method that
+              wraps the entire agent — its tools, its session, its instructions
+              — as a single <code>AIFunction</code>. Register it in another
+              agent's <code>ChatOptions.Tools</code>
+              and the outer LLM will call it like any other function, passing a
+              natural-language prompt and receiving the inner agent's final text
+              as the result. This is
+              <em>LLM-chosen dispatch</em>: the model picks when to invoke the
+              sub-agent based on the tool description, in contrast to
+              <a href="../lesson12/index.html">D2</a>'s code-chosen router which
+              dispatches by pattern-matching a typed route decision.
+            </p>
+            <p>
+              <strong>Model tiering (<code>ModelTiers</code>)</strong>: a
+              three-line static helper that maps a job's reasoning demand to a
+              model string read from <code>IConfiguration</code>. Tiers:
+              <strong>Light</strong> (classification, compaction summarization),
+              <strong>Analyst</strong> (SQL-over-schema work),
+              <strong>Reasoning</strong> (cross-domain synthesis). Default
+              values are baked in as fallbacks;
+              <code>appsettings.json</code> overrides per tier, and
+              <code>appsettings.Testing.json</code> overrides all three to Haiku
+              so every gate runs cheaply. Without this indirection, hardcoded
+              model ids at each call site are invisible to the Testing override
+              — the Testing environment sets <code>Models:Light</code>,
+              <code>Models:Analyst</code>, and <code>Models:Reasoning</code>,
+              not individual string literals.
+            </p>
+          </div>
+
+          <h2>Build it</h2>
+          <ol class="steps">
+            <li>
+              <h3>
+                Confirm ModelTiers is available and wire the Testing override
+              </h3>
+              <p>
+                <code>Agents/ModelTiers.cs</code> was introduced in
+                <a href="../lesson01/index.html">A1</a> — it already exists. No
+                new file is needed here. The three-tier helper maps reasoning
+                demand to a model string read from <code>IConfiguration</code>,
+                with production defaults baked in as fallbacks.
+              </p>
+              <div class="callout callout--note">
+                <span class="callout-label"
+                  >ℹ️ Already exists — A1/lesson01</span
+                >
+                <p>
+                  Reproduced below for reference only. Do <strong>not</strong>
+                  create or overwrite this file — it was created in A1.
+                </p>
+                <div class="codewrap">
+                  <div class="code-meta">
+                    <span class="filename"
+                      >Agents/ModelTiers.cs (introduced in A1/lesson01)</span
+                    >
+                  </div>
+                  <pre
+                    class="code-block"
+                  ><code>using Microsoft.Extensions.Configuration;
+
+namespace AiAgent.Agents;
+
+/// &lt;summary&gt;
+/// Model tiering: one place that maps a job's reasoning demand to a model.
+/// Light = classification/summarization, Analyst = SQL-over-schema work,
+/// Reasoning = cross-domain synthesis and recommendations.
+/// Defaults live here; appsettings "Models" section overrides per tier.
+/// &lt;/summary&gt;
+public static class ModelTiers
+{
+    public static string Light(IConfiguration config)
+        =&gt; config["Models:Light"] ?? "claude-haiku-4-5";
+
+    public static string Analyst(IConfiguration config)
+        =&gt; config["Models:Analyst"] ?? "claude-sonnet-4-6";
+
+    public static string Reasoning(IConfiguration config)
+        =&gt; config["Models:Reasoning"] ?? "claude-opus-4-8";
+}</code></pre>
+                </div>
+              </div>
+              <p>
+                What <em>does</em> belong to this lesson: wiring the Testing
+                override in <code>appsettings.Testing.json</code> so all tiers
+                collapse to Haiku during gates. Every model id across
+                <code>AgentFactory.cs</code>, <code>Router.cs</code>, and
+                <code>ReportWorkflow.cs</code> already reads from
+                <code>ModelTiers.*</code> (you wired those in A1, D1, and D2),
+                so the override reaches all of them.
+              </p>
+              <p>
+                The keys you set here are read back by the three
+                <code>ModelTiers</code> methods. When the app runs with
+                <code>--environment Testing</code>, the .NET config loader
+                merges this file on top of <code>appsettings.json</code>. After
+                that merge, <code>config["Models:Analyst"]</code> returns
+                <code>"claude-haiku-4-5"</code> instead of the production
+                default. So every call site that reads from
+                <code>ModelTiers.Analyst(config)</code> now gets Haiku, with no
+                code change. <strong>Partial excerpt</strong> — the full file
+                also contains a <code>Logging</code> section added in
+                <a href="../lesson15/index.html">E2</a>:
+                <code>"Microsoft.Agents.AI": "Debug"</code>.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">appsettings.Testing.json</span>
+                </div>
+                <pre class="code-block"><code>{
+  "Models": {
+    "Light":     "claude-haiku-4-5",
+    "Analyst":   "claude-haiku-4-5",
+    "Reasoning": "claude-haiku-4-5"
+  }
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>
+                Register the report agent as a named tool on the DataAnalyst
+              </h3>
+              <p>
+                In <code>AgentFactory.cs</code>, the report workflow (built in
+                <a href="../lesson11/index.html">D1</a>) arrives as an
+                <code>AIAgent</code> parameter. You call
+                <code>.AsAIFunction()</code> on it with a tight description.
+                That description is the only thing the outer model reads to
+                decide when to run the report. You register the result alongside
+                the existing SQL tools in <code>ChatOptions.Tools</code>, so the
+                report becomes one more tool the LLM can pick during its tool
+                loop.
+              </p>
+              <p>
+                Both model ids in this factory already read from
+                <code>ModelTiers.*</code> — the DataAnalyst from
+                <code>ModelTiers.Analyst(config)</code>, the compaction
+                summarizer from <code>ModelTiers.Light(config)</code> — so the
+                Testing override reaches them with no change here.
+              </p>
+              <p class="callout callout--build">
+                <span class="callout-label">🔧 Note</span>
+                Add to the existing <code>AgentFactory.Create</code> method in
+                <code>Agents/AgentFactory.cs</code>. Replace the entire method
+                body — the class header and usings are already present from
+                earlier lessons (6 usings: <code>AiAgent.Middleware</code>,
+                <code>AiAgent.Tools</code>, <code>Anthropic</code>,
+                <code>Microsoft.Agents.AI</code>,
+                <code>Microsoft.Agents.AI.Compaction</code>,
+                <code>Microsoft.Extensions.AI</code>). The new
+                <code>AIAgent reportAgent</code> parameter is the only signature
+                change.
+              </p>
+              <p>
+                The method signature gains the
+                <code>reportAgent</code> parameter. Inside, you read the API key
+                from config and create the Anthropic client. Note
+                <code>ModelId</code> now reads from
+                <code>ModelTiers.Analyst(config)</code> instead of a literal
+                string.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Agents/AgentFactory.cs (signature + client)</span
+                  >
+                </div>
+                <pre class="code-block"><code>public static AIAgent Create(
+    IConfiguration config,
+    SchemaTools tools,
+    AnalysisTools analysis,
+    AIAgent reportAgent,
+    ILoggerFactory loggerFactory)
+{
+    var apiKey = config["ANTHROPIC_API_KEY"]
+        ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not set.");
+
+    IAnthropicClient client = new AnthropicClient { ApiKey = apiKey };</code></pre>
+              </div>
+              <p>
+                Next comes the options object. The first seven tools are the SQL
+                and analysis tools from earlier lessons. The eighth entry is the
+                new one: <code>reportAgent.AsAIFunction(...)</code> wraps the
+                whole report workflow as a single tool named
+                <code>run_weekly_report</code>. The model sees this tool in its
+                list and calls it by name when the description matches the
+                user's request.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Agents/AgentFactory.cs (options + agent-as-tool)</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    var options = new ChatClientAgentOptions
+    {
+        Name = "claudalytics-analyst",
+        Description = "Answers natural-language questions over Claudalytics telemetry in ClickHouse.",
+        ChatOptions = new ChatOptions
+        {
+            ModelId = ModelTiers.Analyst(config),
+            Instructions = Instructions.System,
+            Tools =
+            [
+                AIFunctionFactory.Create(tools.GetSchema),
+                AIFunctionFactory.Create(tools.RunSql),
+                new ApprovalRequiredAIFunction(
+                    AIFunctionFactory.Create(tools.RunUnboundedSql)),
+                AIFunctionFactory.Create(tools.ListProjects),
+                AIFunctionFactory.Create(tools.ListRecentSessions),
+                AIFunctionFactory.Create(analysis.CostBreakdown),
+                AIFunctionFactory.Create(analysis.SessionDeepDive),
+                reportAgent.AsAIFunction(new AIFunctionFactoryOptions
+                {
+                    Name = "run_weekly_report",
+                    Description = "Runs the full multi-agent weekly telemetry report " +
+                                  "(cost + security + tooling analysts, then a summarizer). " +
+                                  "Expensive — only when the user asks for the weekly report. " +
+                                  "Input: the time window, e.g. 'the last 7 days'.",
+                }),
+            ],
+        },
+    };</code></pre>
+              </div>
+              <p>
+                The last block builds the agent. The
+                <code>ToolCallLoggingChatClient</code> middleware and the
+                OpenTelemetry builder are unchanged from earlier lessons. The
+                method returns the finished <code>AIAgent</code>.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Agents/AgentFactory.cs (build + return)</span
+                  >
+                </div>
+                <pre class="code-block"><code>    var agent = client.AsAIAgent(
+        options,
+        clientFactory: inner =&gt; new ToolCallLoggingChatClient(
+            inner, loggerFactory.CreateLogger&lt;ToolCallLoggingChatClient&gt;()),
+        loggerFactory: loggerFactory);
+
+    return agent.AsBuilder()
+        .UseOpenTelemetry(OtelSourceName)
+        .Build();
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Inject the report agent and update DI registration</h3>
+              <p>
+                The new <code>reportAgent</code> parameter on
+                <code>AgentFactory.Create</code> needs a value at build time. DI
+                supplies it. In <code>Program.cs</code>, the report
+                <code>AIAgent</code> is already registered as a keyed singleton
+                under the key <code>"report"</code> (from
+                <a href="../lesson11/index.html">D1</a>). The DataAnalyst
+                registration reads it back with
+                <code>GetRequiredKeyedService&lt;AIAgent&gt;("report")</code>
+                and passes it into the factory. The router, insight agents, and
+                report workflow already read their model ids from
+                <code>ModelTiers.*</code>, so they flow through config and pick
+                up the Testing override automatically.
+              </p>
+              <p>
+                Place both registrations inside <code>Program.cs</code> in the
+                DI section (before <code>var app = builder.Build()</code>). The
+                keyed <code>"report"</code> singleton
+                <strong>must appear before</strong> the DataAnalyst singleton.
+                The DataAnalyst factory resolves the keyed service at build
+                time, so the key must exist by then.
+              </p>
+              <p>
+                The first registration exposes the multi-agent report workflow
+                as one <code>AIAgent</code> under the key <code>"report"</code>.
+                The second registration builds the DataAnalyst and reads that
+                keyed agent back as its <code>reportAgent</code> argument.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs (DI wiring excerpt — before var app =
+                    builder.Build())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddKeyedSingleton&lt;AIAgent&gt;("report", (sp, _) =&gt; ReportWorkflow.Create(
+    sp.GetRequiredService&lt;IConfiguration&gt;(),
+    sp.GetRequiredService&lt;SchemaTools&gt;(),
+    sp.GetRequiredService&lt;AnalysisTools&gt;()));
+
+builder.Services.AddSingleton&lt;AIAgent&gt;(sp =&gt; AgentFactory.Create(
+    sp.GetRequiredService&lt;IConfiguration&gt;(),
+    sp.GetRequiredService&lt;SchemaTools&gt;(),
+    sp.GetRequiredService&lt;AnalysisTools&gt;(),
+    sp.GetRequiredKeyedService&lt;AIAgent&gt;("report"),
+    sp.GetRequiredService&lt;ILoggerFactory&gt;()));</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Add a guardrail description to the sub-agent tool</h3>
+              <p>
+                The description you pass to <code>AsAIFunction</code> is the
+                only signal the outer model has to decide when to call this
+                tool. Two rules: name what it does precisely, and add an
+                explicit cost warning so the model does not reach for it on
+                casual questions. You use:
+              </p>
+              <blockquote>
+                "Expensive — only when the user asks for the weekly report."
+              </blockquote>
+              <p>
+                Without that sentence the LLM will call the multi-agent workflow
+                for any question that touches cost or tools — burning
+                Analyst-tier credits on a Haiku-tier clarification.
+              </p>
+            </li>
+          </ol>
+
+          <h2>Model tiering and the Testing override</h2>
+          <p>
+            Every model id in this project already flows through
+            <code>ModelTiers</code> — introduced in
+            <a href="../lesson01/index.html">A1</a> and used since
+            <a href="../lesson11/index.html">D1</a> and
+            <a href="../lesson12/index.html">D2</a>.
+            <code>AgentFactory.cs</code> reads
+            <code>ModelTiers.Analyst(config)</code> for the DataAnalyst and
+            <code>ModelTiers.Light(config)</code> for the compaction summarizer.
+            <code>Router.cs</code> reads <code>ModelTiers.Light(config)</code>.
+            <code>ReportWorkflow.cs</code> reads
+            <code>ModelTiers.Analyst(config)</code> for the analysts and
+            <code>ModelTiers.Reasoning(config)</code> for the summarizer.
+          </p>
+          <p>
+            Because the choice lives in one helper, a single config change
+            reaches every agent. <code>appsettings.Testing.json</code> sets all
+            three tiers to Haiku. So
+            <code>dotnet run -- --environment Testing</code> makes every agent
+            run cheap, with no code change. A literal model string at a call
+            site would be invisible to that override: the Testing file sets
+            <code>Models:Light</code>, <code>Models:Analyst</code>, and
+            <code>Models:Reasoning</code>, not individual literals. That is the
+            reason the choice is centralized in <code>ModelTiers</code>.
+          </p>
+
+          <h2>Why AsAIFunction vs D2's router dispatch</h2>
+          <p>
+            <a href="../lesson12/index.html">D2</a> dispatches with code: the
+            router returns a typed <code>RouteDecision</code> and a
+            <code>switch</code> statement picks the handler. This lesson's
+            <code>AsAIFunction</code> dispatches with the model: the outer agent
+            reads the tool description and decides whether and when to invoke
+            the sub-agent during its own tool-call loop. The two mechanisms are
+            complementary:
+          </p>
+          <ul>
+            <li>
+              <strong>Code-chosen (router)</strong>: deterministic, auditable,
+              correct for capability menus where the catalog is known at build
+              time.
+            </li>
+            <li>
+              <strong>LLM-chosen (AsAIFunction)</strong>: flexible
+              mid-conversation composition — the model can chain the sub-agent
+              with other tools in a single turn, pass it a computed prompt, or
+              skip it based on context the code-level router cannot see.
+            </li>
+          </ul>
+          <p>
+            Both coexist: the router dispatches
+            <em>to</em> the DataAnalyst session, and within that session the
+            DataAnalyst can call the report workflow via
+            <code>run_weekly_report</code> — two layers, two different dispatch
+            mechanisms.
+          </p>
+
+          <h2>Verify</h2>
+          <div class="gate">
+            <p class="gate-title">✅ Gate — do not advance until green</p>
+            <h3>Check 1 — agent-as-tool fires on the chat stream (Haiku)</h3>
+            <p>
+              Start with the Testing environment (<code
+                >dotnet run -- --environment Testing</code
+              >). POST to <code>/chat/stream</code> with a nudging prompt:
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -N -X POST http://localhost:8124/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"message": "please run the weekly report for the last 7 days"}'</code></pre>
+            </div>
+            <p>
+              You must see a <code>tool_call</code> SSE event with
+              <code>name: "run_weekly_report"</code> in the stream, followed by
+              a <code>token</code> event containing the report narrative, then
+              <code>done</code>.
+            </p>
+            <h3>Check 2 — tiering (the ONE real-tier check)</h3>
+            <p>
+              Run <strong>without</strong> the Testing override for one turn
+              only:
+            </p>
+            <div class="codewrap">
+              <pre class="code-block"><code>dotnet run</code></pre>
+            </div>
+            <p>
+              POST one message to <code>/chat</code> (router turn) and one to
+              <code>/report</code> (summarizer turn). Then query your OTel
+              traces table — both span types must be present and their
+              <code>model_id</code> attributes must differ:
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>-- In ClickHouse (or your OTel viewer)
+SELECT
+    SpanAttributes['gen_ai.request.model'] AS model_id,
+    count() AS spans
+FROM otel_traces
+WHERE ServiceName = 'claudalytics-agent'
+  AND Timestamp &gt; now() - INTERVAL 5 MINUTE
+GROUP BY model_id;</code></pre>
+            </div>
+            <p>
+              You should see at least two distinct model ids — the Light-tier
+              router and the Analyst/Reasoning-tier summarizer.
+              <strong>Return to Testing immediately</strong>
+              after this check.
+            </p>
+            <h3>Negative test</h3>
+            <p>
+              Back on Testing, POST a data question that does NOT mention the
+              weekly report: "which project spent the most last week?" The
+              stream must NOT contain a
+              <code>tool_call</code> event named <code>run_weekly_report</code>.
+              Identical model ids in the real-tier check means the config is not
+              flowing — verify that you did not pass
+              <code>--environment Testing</code> for that check, that
+              <code>appsettings.json</code> holds the real (non-Haiku)
+              <code>Models</code> values, and that every agent call site uses
+              <code>ModelTiers.*</code> and not a literal string.
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ Pitfalls</span>
+            <ul>
+              <li>
+                <strong>Sub-agent called on casual questions</strong> →
+                description is too vague. Add "Expensive — only when the user
+                explicitly asks for the weekly report" to the
+                <code>AsAIFunction</code> description.
+              </li>
+              <li>
+                <strong>Identical model ids in the tiering check</strong> → a
+                call site has a stray literal model string instead of a
+                <code>ModelTiers.*</code> call. Search for
+                <code>"claude-</code> across all <code>.cs</code> files; every
+                hit outside <code>ModelTiers.cs</code> is one to fix.
+              </li>
+              <li>
+                <strong>Testing override has no effect</strong> → check the
+                <code>--</code> separator and environment name; full details in
+                <a href="../lesson00/index.html">L0</a>.
+              </li>
+              <li>
+                <strong>Report agent keyed service not resolved</strong> → the
+                DataAnalyst factory receives <code>null</code> for
+                <code>reportAgent</code>. Ensure
+                <code>GetRequiredKeyedService&lt;AIAgent&gt;("report")</code> —
+                not <code>GetRequiredService&lt;AIAgent&gt;</code> — is used
+                when building the DataAnalyst.
+              </li>
+              <li>
+                <strong>Inner agent re-uses the outer session</strong> → when
+                called via <code>AsAIFunction</code> the sub-agent runs a fresh
+                ephemeral session each invocation (no session parameter is
+                passed). This is correct. Do not pass the outer agent's
+                <code>AgentSession</code> into the sub-agent's tool options.
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              Mark lesson complete
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

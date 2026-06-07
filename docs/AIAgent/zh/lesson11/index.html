@@ -1,0 +1,715 @@
+<!doctype html>
+<!-- lesson11/index.html — D1 · Weekly report: hand-built graph → builder sugar -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>D1 · 周报：手搓图 → 构建器语法糖 — MAF 课程</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="11">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">课程</a> / 模块 D / D1
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">第 11 课 · D1 · 模块 D — 组合与编排</p>
+            <h1>周报：手搓图 → 构建器语法糖</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★</span>
+              <span class="badge badge--cost">Haiku</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>你将学到什么</h2>
+          <p>
+            周报需要三个分析师（analyst）同时跑，再由一个写手汇总。预制构建器
+            <code>BuildConcurrent</code> 和 <code>BuildSequential</code>
+            几行就能做到，但一旦它们出错（并发退化成顺序、取错消息、追踪看不出并发），
+            把它们当魔法就没法调试。所以你先手工搭一遍，看清它们生成的那张图。
+          </p>
+          <p>
+            你会构建两遍：v1 用来自
+            <a href="../lesson04/index.html">B1</a>–<a
+              href="../lesson06/index.html"
+              >B3</a
+            >
+            的原始 <code>WorkflowBuilder</code> 手工连线；v2 用预制构建器重写，
+            发现两者<strong>生成同一张图</strong>。手搓的 v1
+            只是用来揭示构建器生成的图——你保留 v2。 它的作用是
+            让你看清底层的图，以便日后调试任何编排（orchestration）形态。
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 讲解</span>
+            <p>
+              <strong>模块 D 中三个新的 API 面：</strong>
+            </p>
+            <ul>
+              <li>
+                <code>AgentWorkflowBuilder.BuildConcurrent(agents)</code> —
+                把列出的所有智能体（agent）作为单个工作流超步（superstep）并行扇出（fan-out）；
+                聚合后的输出流向下一阶段。
+                等价于原始构建器里的一条扇出边（edge）加一道扇入屏障（fan-in
+                barrier）。
+              </li>
+              <li>
+                <code>AgentWorkflowBuilder.BuildSequential(agents)</code> —
+                把智能体一个接一个串联起来，每个都把上一个智能体的输出当作自己的输入。
+                等价于一连串直连的边（edge）。
+              </li>
+              <li>
+                <code>workflow.AsAIAgent(name, description)</code> —
+                把任意工作流包装成单个
+                <code>AIAgent</code>。调用方只看到一个智能体；
+                框架在内部执行完整的图。这就是概念
+                <strong>#10（工作流即智能体）</strong>——它可组合：
+                你可以把工作流智能体嵌套进更大的工作流（workflow）里。
+              </li>
+            </ul>
+            <p>
+              <strong>数据契约：</strong
+              >每个分析师都收到用户的提示词。它的输出进入工作流的对话记录（transcript）。
+              汇总器把之前所有智能体的<em>聚合对话记录</em>作为自己的上下文（context）——这正是为什么
+              “Do not call
+              tools”（不要调用工具（tool））这条指令对汇总器是关键所在：
+              等它运行时，事实数据早已存在于消息历史中。
+            </p>
+          </div>
+
+          <h2>动手构建</h2>
+          <ol class="steps">
+            <li>
+              <h3>编写分析师指令</h3>
+              <p>
+                三个分析师智能体（agent）各自需要一段聚焦的提示词：一个调查成本，一个调查安全信号，
+                一个调查工具（tool）健康度。它们共享一个共同契约——“不要客套，不要反问，
+                你的输出会喂给另一个智能体”——所以你把它放进一个共享常量里强制执行，
+                再在其上插入各领域的具体范围。
+              </p>
+              <p>
+                汇总器则不同：它收到来自全部三位分析师的发现，必须在不调用任何工具（tool）的情况下，
+                拼出一份连贯的 markdown 报告。
+                <code>Do not call tools</code> 这道防护是强制性的——少了它，
+                汇总器可能会试图自己去采集数据，使成本翻倍并产出杂乱无章的结果。
+              </p>
+              <div class="callout callout--note">
+                <span class="callout-label">ℹ️ 累积状态</span>
+                <p>
+                  <code>Instructions.SchemaDoc</code> 是一个定义在
+                  <code>Agents/Instructions.cs</code>（在
+                  <a href="../lesson01/index.html">A1</a> 中引入）里的
+                  <code>const string</code>。它内嵌了 ClickHouse 表的 schema，
+                  这样每个用到它的智能体（agent）都会自动获得最新的列信息。
+                  <code>ModelTiers.Analyst(config)</code> 和
+                  <code>ModelTiers.Reasoning(config)</code> 来自
+                  <code>Agents/ModelTiers.cs</code>，同样在
+                  <a href="../lesson01/index.html">A1</a>
+                  中引入——它已经就绪，直接用即可。
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Agents/AnalystInstructions.cs</span>
+                </div>
+                <pre class="code-block"><code>namespace AiAgent.Agents;
+
+public static class AnalystInstructions
+{
+    private const string AnalystCommon = $"""
+        You are one specialist in a reporting pipeline. Investigate ONLY your domain
+        using the SQL tools, then output your findings as a compact markdown section:
+        headline numbers first, then 2-4 bullet observations. Mention anything unusual
+        explicitly. No pleasantries, no questions back — your output feeds another agent.
+        Run at most 4 queries.
+
+        {Instructions.SchemaDoc}
+        """;
+
+    public const string Cost = $"""
+        DOMAIN: cost &amp; token economics for the requested time window.
+        Investigate: spend per project FIRST (the fundamental access unit — scope to
+        one project if the request names one), total spend, spend per model, most
+        expensive sessions, cache-read vs input token ratio (cache economics), spend trend vs the
+        previous window of the same length.
+
+        {AnalystCommon}
+        """;
+
+    public const string Security = $"""
+        DOMAIN: security signals for the requested time window.
+        Investigate: credential_exposures (which files, which categories),
+        blocked_tools (what was denied, FINAL + completed=0), file deletions in
+        file_mutations, and unusual domains in websites_visited.
+
+        {AnalystCommon}
+        """;
+
+    public const string Tooling = $"""
+        DOMAIN: tooling health for the requested time window.
+        Investigate: tool call volumes and failure rates (event tool_result,
+        success != 'true'), slowest tools by avg duration_ms, compaction_events
+        frequency (a long/expensive-session smell), and subagent usage if present.
+
+        {AnalystCommon}
+        """;
+
+    public const string Summarizer = """
+        You are the report writer at the end of a pipeline. You receive findings from
+        three specialist analysts: cost, security, and tooling. Produce ONE coherent
+        report in markdown:
+
+        # Claude Code Report
+        ## Highlights        (3-5 bullets, the things a team lead must know)
+        ## Cost              (condensed from the cost analyst)
+        ## Security          (condensed from the security analyst)
+        ## Tooling           (condensed from the tooling analyst)
+        ## Anomalies &amp; Recommendations   (anything unusual + 1-3 concrete suggestions)
+
+        Keep numbers exact as given by the analysts. Do not invent data. Do not call tools.
+        """;
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>v1 — 手工搭建图（概念草图）</h3>
+              <p>
+                只用来自 <a href="../lesson04/index.html">B1</a> 的原始
+                <code>WorkflowBuilder</code>，你就能手工搭出这条流水线。
+                它的形态是：从单条起始消息扇出（fan-out）到三个分析师执行器（executor）节点（node）；
+                一道扇入屏障（fan-in
+                barrier）等待这三者全部完成；聚合后的输出喂给一个汇总器执行器节点。
+                下面的标签页对比了这两个版本。
+              </p>
+
+              <div class="tabs">
+                <div class="tab-bar">
+                  <button class="tab-btn active">v1 — 原始图（示意）</button>
+                  <button class="tab-btn">v2 — 构建器语法糖（真实代码）</button>
+                </div>
+
+                <div class="tab-panel active">
+                  <div class="callout callout--pitfall">
+                    <span class="callout-label"
+                      >⚠️ 请勿编译 — 仅为示意伪代码</span
+                    >
+                    <p>
+                      下面的 v1 片段用到了
+                      <code>ReportRequest</code>、<code>AnalystFindings</code>、
+                      <code>AggregatedFindings</code> 和
+                      <code>WorkflowBuilder.StartNodeName</code>
+                      ——这些类型在 MAF 中
+                      <strong>并不存在</strong
+                      >，会产生编译错误。这只是一段概念草图， 用来展示
+                      <code>BuildConcurrent</code> /
+                      <code>BuildSequential</code> 在内部生成的图形态。
+                      <strong
+                        >只有 v2
+                        标签页（ReportWorkflow.cs）才是真实代码。</strong
+                      >
+                    </p>
+                  </div>
+                  <div class="codewrap">
+                    <pre
+                      class="code-block"
+                    ><code>// v1: ILLUSTRATIVE PSEUDOCODE — do NOT compile.
+// These types (ReportRequest, AnalystFindings, AggregatedFindings,
+// WorkflowBuilder.StartNodeName) do not exist in MAF.
+// Purpose: show the graph shape that BuildConcurrent / BuildSequential
+// produce internally — once you understand the shape, use the v2 form.
+
+var builder = new WorkflowBuilder();
+
+// Three analyst agent-nodes
+builder.AddNode&lt;ReportRequest, AnalystFindings&gt;("CostAnalyst",
+    async (msg, ctx, ct) =&gt;
+    {
+        var result = await costAnalyst.RunAsync(msg.Prompt, ct);
+        return new AnalystFindings("CostAnalyst", result.Text);
+    });
+
+builder.AddNode&lt;ReportRequest, AnalystFindings&gt;("SecurityAnalyst",
+    async (msg, ctx, ct) =&gt;
+    {
+        var result = await securityAnalyst.RunAsync(msg.Prompt, ct);
+        return new AnalystFindings("SecurityAnalyst", result.Text);
+    });
+
+builder.AddNode&lt;ReportRequest, AnalystFindings&gt;("ToolingAnalyst",
+    async (msg, ctx, ct) =&gt;
+    {
+        var result = await toolingAnalyst.RunAsync(msg.Prompt, ct);
+        return new AnalystFindings("ToolingAnalyst", result.Text);
+    });
+
+// Fan-out: one input message -&gt; all three analyst nodes
+builder.AddFanOutEdge&lt;ReportRequest&gt;(
+    sourceNode: WorkflowBuilder.StartNodeName,
+    targetNodes: ["CostAnalyst", "SecurityAnalyst", "ToolingAnalyst"],
+    partitioner: (msg, idx) =&gt; msg);   // same prompt to each
+
+// Fan-in barrier: all three findings -&gt; summarizer
+builder.AddFanInEdge&lt;AnalystFindings, AggregatedFindings&gt;(
+    sourceNodes: ["CostAnalyst", "SecurityAnalyst", "ToolingAnalyst"],
+    targetNode: "Summarizer",
+    aggregator: findings =&gt; new AggregatedFindings(findings));
+
+builder.AddNode&lt;AggregatedFindings, string&gt;("Summarizer",
+    async (msg, ctx, ct) =&gt;
+    {
+        var context = string.Join("\n\n", msg.Items.Select(f =&gt; f.Content));
+        var result = await summarizer.RunAsync(context, ct);
+        return result.Text;
+    });
+
+builder.SetOutputNode("Summarizer");
+var workflow = builder.Build();
+// To expose as one agent: workflow.AsAIAgent("telemetry-report", "...")</code></pre>
+                  </div>
+                </div>
+
+                <div class="tab-panel">
+                  <p>
+                    这是真实文件，下面拆成四段，按顺序粘进同一个文件。先是
+                    using、 namespace 和 Anthropic
+                    客户端——客户端只建一次，四个智能体共享。
+                  </p>
+                  <div class="codewrap">
+                    <div class="code-meta">
+                      <span class="filename">Agents/ReportWorkflow.cs</span>
+                    </div>
+                    <pre class="code-block"><code>using AiAgent.Tools;
+using Anthropic;
+using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Workflows;
+using Microsoft.Extensions.AI;
+
+namespace AiAgent.Agents;
+
+public static class ReportWorkflow
+{
+    public static AIAgent Create(IConfiguration config, SchemaTools tools, AnalysisTools analysis)
+    {
+        var apiKey = config["ANTHROPIC_API_KEY"]
+            ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not set.");
+
+        IAnthropicClient client = new AnthropicClient { ApiKey = apiKey };</code></pre>
+                  </div>
+                  <p>
+                    然后选模型层级（tier）和工具列表。三个分析师要用 SQL
+                    采集数据， 所以跑在便宜的 <code>Analyst</code> 层并拿到 SQL
+                    工具； 汇总器只写文字，跑在
+                    <code>Reasoning</code> 层且不给工具。
+                    <code>sqlTools</code> 列表在下一段传给每个分析师。
+                  </p>
+                  <div class="codewrap">
+                    <pre
+                      class="code-block"
+                    ><code>        var analystModel = ModelTiers.Analyst(config);
+        var reasoningModel = ModelTiers.Reasoning(config);
+
+        List&lt;AITool&gt; sqlTools =
+        [
+            AIFunctionFactory.Create(tools.GetSchema),
+            AIFunctionFactory.Create(tools.RunSql),
+            AIFunctionFactory.Create(tools.ListProjects),
+            AIFunctionFactory.Create(analysis.CostBreakdown),
+            AIFunctionFactory.Create(analysis.SessionDeepDive),
+        ];</code></pre>
+                  </div>
+                  <p>
+                    接着建四个智能体并组装图。<code>BuildConcurrent</code>
+                    把三个分析师包成并行扇出，<code>AsAIAgent</code>
+                    再把它打包成一个名为 <code>"Analysts"</code> 的智能体。
+                    <code>BuildSequential</code> 把它放到汇总器之前，
+                    汇总器读到聚合后的分析师输出；外层
+                    <code>AsAIAgent</code> 把整张图暴露为
+                    <code>"telemetry-report"</code>，由
+                    <code>/report</code> 端点解析。
+                  </p>
+                  <div class="codewrap">
+                    <pre
+                      class="code-block"
+                    ><code>        var costAnalyst    = CreateAnalyst(client, analystModel,   "CostAnalyst",     AnalystInstructions.Cost,     sqlTools);
+        var securityAnalyst = CreateAnalyst(client, analystModel,  "SecurityAnalyst",  AnalystInstructions.Security, sqlTools);
+        var toolingAnalyst  = CreateAnalyst(client, analystModel,  "ToolingAnalyst",   AnalystInstructions.Tooling,  sqlTools);
+        var summarizer      = CreateAnalyst(client, reasoningModel, "Summarizer",       AnalystInstructions.Summarizer, tools: null);
+
+        var analystsWorkflow = AgentWorkflowBuilder.BuildConcurrent(
+            [costAnalyst, securityAnalyst, toolingAnalyst]);
+
+        var analystsAgent = analystsWorkflow.AsAIAgent(
+            name: "Analysts",
+            description: "Runs cost, security and tooling analysts concurrently.");
+
+        var reportWorkflow = AgentWorkflowBuilder.BuildSequential([analystsAgent, summarizer]);
+
+        return reportWorkflow.AsAIAgent(
+            name: "telemetry-report",
+            description: "Produces a Claude Code telemetry report for the requested window.");
+    }</code></pre>
+                  </div>
+                  <p>
+                    最后是建每个分析师的辅助方法。它用
+                    <code>UseOpenTelemetry</code> 让每个分析师发出各自的
+                    <code>invoke_agent</code> span，
+                    追踪时间线上三者重叠就是并发的证据。
+                    <code>AgentFactory.OtelSourceName</code> 来自
+                    <code>Agents/AgentFactory.cs</code>（在
+                    <a href="../lesson09/index.html">C2</a> 中引入），已经就绪。
+                  </p>
+                  <div class="codewrap">
+                    <pre
+                      class="code-block"
+                    ><code>    private static AIAgent CreateAnalyst(
+        IAnthropicClient client, string model, string name, string instructions, List&lt;AITool&gt;? tools)
+    {
+        var agent = client.AsAIAgent(model: model, instructions: instructions, name: name, tools: tools);
+
+        return agent.AsBuilder()
+            .UseOpenTelemetry(AgentFactory.OtelSourceName)
+            .Build();
+    }
+}</code></pre>
+                  </div>
+                </div>
+              </div>
+
+              <div class="callout callout--note">
+                <span class="callout-label">ℹ️</span>
+                <p>
+                  <strong
+                    >为什么要嵌套两次 <code>AsAIAgent</code> 调用？</strong
+                  >
+                  内层调用把并发扇出包装成一个名为
+                  <code>"Analysts"</code> 的整体单元。 外层的
+                  <code>BuildSequential</code>
+                  随后把这整块并发块当作汇总器之前的
+                  <em>一个阶段</em>来处理。这种两级嵌套——顺序里套并发—— 正是用
+                  MAF 惯用方式表达“这些全部并行，然后这一个”的写法。
+                </p>
+              </div>
+            </li>
+
+            <li>
+              <h3>接一个共享 runner，避免重复的调用逻辑</h3>
+              <p>
+                <code>/report</code> 端点（endpoint）和
+                <a href="../lesson12/index.html">D2</a>
+                的菜单注册表都会调用同一个工作流智能体（agent），所以把“取最后一条消息、收集作者名”抽成一个静态辅助方法。
+              </p>
+              <p>
+                工作流智能体返回的是完整对话记录（transcript），不是一个字符串。辅助方法从中读两样东西：
+                成品是<em>最后</em>一条非空消息（汇总器的报告），前面的是分析师发现；
+                <code>AgentsInvolved</code> 收集去重后的作者名。<code
+                  >/report</code
+                >
+                端点把 <code>AgentsInvolved</code> 放进
+                JSON，供验证步骤确认四个智能体都跑过。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Agents/ReportRunner.cs</span>
+                </div>
+                <pre class="code-block"><code>using Microsoft.Agents.AI;
+
+namespace AiAgent.Agents;
+
+public static class ReportRunner
+{
+    public static async Task&lt;(string Report, List&lt;string&gt; AgentsInvolved)&gt; RunAsync(
+        AIAgent reportAgent, string window, CancellationToken ct)
+    {
+        var response = await reportAgent.RunAsync(
+            $"Produce the report for {window}.", cancellationToken: ct);
+
+        var lastMessage = response.Messages.LastOrDefault(m =&gt; !string.IsNullOrWhiteSpace(m.Text));
+        var agentsInvolved = response.Messages
+            .Select(m =&gt; m.AuthorName)
+            .Where(author =&gt; !string.IsNullOrEmpty(author))
+            .Distinct()
+            .Select(author =&gt; author!)
+            .ToList();
+
+        return (lastMessage?.Text ?? response.Text, agentsInvolved);
+    }
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>
+                注册工作流（workflow）智能体（agent）并暴露端点（endpoint）
+              </h3>
+              <p>
+                把工作流（workflow）智能体（agent）注册为带键单例（keyed
+                singleton）——之所以带键，是因为 DI 容器里还持有主
+                <code>DataAnalyst</code>（一个无键的
+                <code>AIAgent</code>），两者绝不能冲突。
+                <code>/report</code> 端点（endpoint）返回 JSON；
+                <code>/report/stream</code> 端点发出带有逐智能体步骤事件的 SSE，
+                这样客户端就能在每位分析师完成时渲染进度。
+              </p>
+              <div class="callout callout--note">
+                <span class="callout-label">ℹ️ 已就绪</span>
+                <p>
+                  <code>[FromKeyedServices]</code> 位于
+                  <code>Microsoft.Extensions.DependencyInjection</code>
+                  命名空间，最小 API 宿主已包含——无需额外 using。
+                  <code>SseEvent</code> 是
+                  <a href="../lesson02/index.html">A2</a>
+                  中引入的静态辅助方法，已在
+                  <code>Program.cs</code> 里。每段下面都注明放置位置。
+                </p>
+              </div>
+              <p>
+                先是 DI 注册，放在 DI 区块里、<code
+                  >var app = builder.Build();</code
+                >
+                之前。键 <code>"report"</code> 让它与无键的
+                <code>DataAnalyst</code> 区分开；端点用
+                <code>[FromKeyedServices("report")]</code>
+                解析，两处键字符串必须一致。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs (excerpts)</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddKeyedSingleton&lt;AIAgent&gt;("report", (sp, _) =&gt; ReportWorkflow.Create(
+    sp.GetRequiredService&lt;IConfiguration&gt;(),
+    sp.GetRequiredService&lt;SchemaTools&gt;(),
+    sp.GetRequiredService&lt;AnalysisTools&gt;()));</code></pre>
+              </div>
+              <p>
+                然后是 <code>/report</code> 端点，放在
+                <code>var app = builder.Build();</code> 之后。它调用
+                <code>ReportRunner</code>，把报告和
+                <code>agentsInvolved</code> 列表作为 JSON 返回。
+              </p>
+              <div class="codewrap">
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/report", async (ReportRequest? request,
+    [FromKeyedServices("report")] AIAgent reportAgent, CancellationToken ct) =&gt;
+{
+    var window = string.IsNullOrWhiteSpace(request?.Window) ? "the last 7 days" : request.Window;
+    var (report, agentsInvolved) = await ReportRunner.RunAsync(reportAgent, window, ct);
+    return Results.Ok(new { report, agentsInvolved });
+});</code></pre>
+              </div>
+              <p>
+                再是
+                <code>/report/stream</code>
+                端点。它流式跑，作者名每变一次就发一个
+                <code>agent_step</code> 事件，客户端据此显示当前分析师；
+                验证步骤用这些事件的先后顺序证明分析师是并行跑的。
+              </p>
+              <div class="codewrap">
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/report/stream", async (ReportRequest? request, HttpContext context,
+    [FromKeyedServices("report")] AIAgent reportAgent, CancellationToken ct) =&gt;
+{
+    var window  = string.IsNullOrWhiteSpace(request?.Window) ? "the last 7 days" : request!.Window;
+
+    context.Response.Headers.ContentType = "text/event-stream";
+    context.Response.Headers.CacheControl = "no-cache";
+
+    try
+    {
+        string? currentAgent = null;
+        await foreach (var update in reportAgent.RunStreamingAsync(
+            $"Produce the report for {window}.", cancellationToken: ct))
+        {
+            if (!string.IsNullOrEmpty(update.AuthorName) &amp;&amp; update.AuthorName != currentAgent)
+            {
+                currentAgent = update.AuthorName;
+                await SseEvent.WriteAsync(context.Response, "agent_step", new { agent = currentAgent }, ct);
+            }
+            if (!string.IsNullOrEmpty(update.Text))
+                await SseEvent.WriteAsync(context.Response, "token",
+                    new { agent = currentAgent, text = update.Text }, ct);
+        }
+        await SseEvent.WriteAsync(context.Response, "done", new { }, ct);
+    }
+    catch (Exception ex)
+    {
+        await SseEvent.WriteAsync(context.Response, "error", new { message = ex.Message }, ct);
+    }
+});</code></pre>
+              </div>
+              <p>
+                最后在文件作用域、<code>app.Run();</code> 之后，与其它请求
+                record 一起声明：
+                <code
+                  >internal sealed record ReportRequest(string? Window);</code
+                >
+              </p>
+            </li>
+          </ol>
+
+          <h2>为什么这个揭示很重要</h2>
+          <p>
+            v1 的图和 v2 的构建器调用产生的是同样的运行时执行：
+            三个并发的超步（superstep）节点（node），后面跟一个顺序节点。
+            区别纯粹在于你要亲自承担多少记账工作。原始构建器让你能自定义分区器（partitioner）、
+            边（edge）谓词（edge predicate）和自定义执行器（executor）——你在
+            <a href="../lesson04/index.html">B1</a>–<a
+              href="../lesson06/index.html"
+              >B3</a
+            >
+            中就会这么做，在 F2 的调查流水线里还会再来一遍。
+            高层构建器以放弃控制力为代价，换来了简洁。
+            既然你两者都见过了，就能为每种情况选对合适的抽象层级。
+          </p>
+
+          <div class="callout callout--evolution">
+            <span class="callout-label">🔄 演进脉络</span>
+            <p>
+              <strong>7 段脉络中的第 3 段。</strong>上面手搓的 v1
+              图只是用来揭示构建器生成的图——
+              它唯一的用途就是揭开语法糖的神秘面纱；你保留 v2。这里创建的 v2
+              <code>ReportWorkflow</code> 会在
+              <a href="../lesson12/index.html">D2</a>（路由器（router） +
+              菜单注册表）中 成为一个一等公民式的菜单项，在 D3 中被包装为
+              DataAnalyst 上的“智能体（agent）即工具（tool）”，
+              并一路延续到毕业项目，在那里通过 A2A 对外暴露。
+            </p>
+          </div>
+
+          <h2>验证</h2>
+          <div class="gate">
+            <p class="gate-title">✅ 关卡 — 未变绿前不要前进</p>
+
+            <p><strong>检查 1 — 报告点名了全部四个智能体（agent）：</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/report \
+  -H "Content-Type: application/json" \
+  -d '{"window":"last 7 days"}' | jq '.agentsInvolved'
+# Must contain: "CostAnalyst", "SecurityAnalyst", "ToolingAnalyst", "Summarizer"</code></pre>
+            </div>
+
+            <p>
+              <strong
+                >检查 2 —
+                分析师步骤在流式（streaming）输出中交错出现（说明并发是真的）：</strong
+              >
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -N -X POST http://localhost:8124/report/stream \
+  -H "Content-Type: application/json" \
+  -d '{"window":"last 7 days"}'
+# You MUST see agent_step events for CostAnalyst, SecurityAnalyst, and ToolingAnalyst
+# BEFORE the agent_step event for Summarizer.
+# The three analyst steps may appear in any order relative to each other (they ran in parallel).
+# The Summarizer agent_step MUST be the last one before "done".</code></pre>
+            </div>
+
+            <p>
+              <strong>检查 3 — v1 和 v2 产生等价的结构：</strong>
+            </p>
+            <p>
+              如果你在替换之前在本地搭过 v1：两者都应返回一份带有
+              <code>## Cost</code>、<code>## Security</code>、<code
+                >## Tooling</code
+              >
+              和 <code>## Highlights</code> 各小节的 markdown 文档。
+              具体措辞会有差异（LLM
+              输出），但这些小节标题足以证明跑的是同一种流水线形态。
+            </p>
+
+            <p>
+              <strong>反向测试 — 扇出（fan-out）退化成了顺序：</strong>
+            </p>
+            <p>
+              如果三个分析师的 <code>agent_step</code> 事件严格按顺序出现
+              （每个各有一个 done 事件，时间戳没有交错），
+              那么并发扇出就没起作用——这些智能体（agent）是一个接一个被运行的。
+              请确认 <code>BuildConcurrent</code> 在用
+              <code>AsAIAgent</code> 包装之前
+              被应用到了全部三个分析师上，而不是用了
+              <code>BuildSequential</code>。
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ 常见坑</span>
+            <ul>
+              <li>
+                <strong>分析师以对话口吻回应，而不是在做报告</strong>
+                → 提示词契约“你的输出会喂给另一个智能体（agent）”缺失了。
+                少了它，模型会反问澄清性问题或加入客套话，
+                这会污染汇总器的上下文（context），产出一份混乱的报告。
+                <code>AnalystCommon</code> 常量负责强制执行这一点。
+              </li>
+              <li>
+                <strong>汇总器调用了 SQL 工具并捏造数据</strong> → 汇总器在
+                <code>CreateAnalyst</code> 中传入的是
+                <code>tools: null</code>。如果不小心给它传了工具（tool），
+                汇总器有时会试图自己去采集数据——成本翻倍，而且依据不一致。
+                此外：如果指令里没有
+                <em>“Do not call tools”</em>，即便是没有工具的汇总器，
+                也可能声称自己无法作答，因为它“没有数据访问权限”。
+              </li>
+              <li>
+                <strong>找不到带键注册——DI 在启动时抛错</strong>
+                → 端点用的是 <code>[FromKeyedServices("report")]</code>；
+                如果注册时用了不同的键字符串（或注册时没带键），
+                应用会在首次请求时崩溃，而非在启动时崩溃。 请确认
+                <code>AddKeyedSingleton</code>
+                和端点特性两处的键字符串完全一致。
+              </li>
+              <li>
+                <strong>从对话记录里取错了消息</strong> →
+                对工作流（workflow）智能体（agent）调用
+                <code>RunAsync</code> 返回的是完整的对话记录。 取
+                <code>response.Text</code> 只会得到最后一次更新，可能并不完整。
+                <code>ReportRunner</code> 用的是
+                <code
+                  >response.Messages.LastOrDefault(m =&gt;
+                  !string.IsNullOrWhiteSpace(m.Text))</code
+                >
+                ——最后一条非空消息——它可靠地就是汇总器的输出。
+              </li>
+              <li>
+                <strong>OTel span 显示不出并发</strong> → 每个分析师都需要自己的
+                <code>UseOpenTelemetry</code> 调用（在
+                <code>CreateAnalyst</code> 里完成）。
+                少了它，分析师们会共享默认的 span 上下文，
+                即使图是并发跑的，追踪时间线也会塌缩成一条看起来像顺序执行的线。
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              标记本课完成
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

@@ -1,0 +1,821 @@
+<!doctype html>
+<!-- lesson07/index.html — B4 · State that survives death -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>B4 · 能在进程死亡后存活的状态 — MAF 课程</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="07">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">课程</a> / 模块 B / B4
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">第 07 课 · B4 · 模块 B — 图</p>
+            <h1>能在进程死亡后存活的状态：检查点与恢复</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★★</span>
+              <span class="badge badge--cost">无需 LLM</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>你将学到什么</h2>
+          <p>
+            一次调查可能跑几分钟，发出很多 ClickHouse 查询（探针 probe），以后在
+            F2
+            还会停下来等人审批。如果进程崩溃或重启，你不想从零重来：重跑探针、
+            重付 LLM 费用、丢掉已经给过的审批。<strong
+              >B4 让一次运行能在重启后从中断处继续。</strong
+            >
+          </p>
+          <p>
+            执行器（executor）看起来是普通对象，所以容易把扇入结果放进字段。但进程重启后
+            字段会变空，结果就错了或为空。修复办法：状态不放自己的字段，放进工作流上下文（context）。
+            之后
+            <code>FileSystemJsonCheckpointStore</code>
+            会在每个超步（superstep）自动保存并恢复它。
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 讲解</span>
+            <p>
+              <strong>主要心智模型：</strong
+              >上下文（context）是一次运行里唯一能持久保存的存储，
+              其他都是临时的。
+            </p>
+            <ul>
+              <li>
+                <code>ReadStateAsync&lt;T&gt;(key, scopeName?)</code> —
+                读一个值。省略
+                <code>scopeName</code> 用私有作用域，传名字用共享作用域。
+              </li>
+              <li>
+                <code>ReadOrInitStateAsync&lt;T&gt;(key, factory)</code> —
+                读取，不存在就用默认值初始化（累加器首次为空时必需）。
+              </li>
+              <li>
+                <code>QueueStateUpdateAsync(key, value, scopeName?)</code> —
+                排队写入，超步边界原子应用并纳入检查点。
+              </li>
+              <li>
+                <code>FileSystemJsonCheckpointStore(DirectoryInfo)</code> —
+                把每个检查点存为 <code>{runId}_{checkpointId}.json</code> 文件。
+              </li>
+              <li>
+                <code>CheckpointManager.CreateJson(store, null)</code> —
+                包装存储，传给 <code>RunStreamingAsync</code> 即启用检查点。
+              </li>
+              <li>
+                <code
+                  >ResumeStreamingAsync(workflow, checkpointInfo, manager)</code
+                >
+                — 重建图并从指定检查点恢复（一个
+                <code>Workflow</code> 只能被一个 runner 持有）。
+              </li>
+            </ul>
+          </div>
+
+          <h2>为什么分两阶段：先排队再应用</h2>
+          <p>
+            运行时不立即写状态，而是收集后在超步结束时一起应用。这避免了扇入（fan-in）时
+            多个探针并发写互相覆盖。所以每个执行器在开头用
+            <code>ReadStateAsync</code> 读取，
+            读到的总是上次已保存的值，不会是别的执行器写到一半的值。
+          </p>
+
+          <h2>动手构建</h2>
+
+          <div class="callout callout--note">
+            <span class="callout-label">ℹ️</span>
+            <p>
+              本课复用 B3 的流水线（<a href="../lesson06/index.html"
+                >B3 — 智能体就是一个节点</a
+              >）。下面重构验证器（v1 → v2），并接入
+              <code>InvestigationService</code> 负责检查点与恢复。
+            </p>
+          </div>
+
+          <ol class="steps">
+            <li>
+              <h3>步骤 1 — 理解为什么 v1 在恢复时会崩</h3>
+              <p>
+                仔细看这个
+                v1。单进程测试全过。但若进程在扇入超步与合成超步之间被杀，
+                <code>_collected</code>
+                列表只在内存里，恢复后变空，计数再也到不了 3， 验证器从此沉默。
+              </p>
+
+              <div class="tabs">
+                <div class="tab-bar">
+                  <button class="tab-btn active">
+                    v1 — 实例字段（恢复时崩溃）
+                  </button>
+                  <button class="tab-btn">v2 — 上下文状态（持久）</button>
+                </div>
+
+                <div class="tab-panel active">
+                  <!-- illustrative v1 — naive approach, do not ship -->
+                  <div class="codewrap">
+                    <pre
+                      class="code-block"
+                    ><code>// ❌ ValidatorExecutor v1 — illustrative (do NOT ship this)
+[SendsMessage(typeof(DeepDiveRequest))]
+[SendsMessage(typeof(Findings))]
+public sealed class ValidatorExecutor() : Executor&lt;ProbeResult&gt;("validator")
+{
+    private const int ExpectedProbes = 3;
+
+    // Instance field: invisible to the checkpoint serialiser.
+    // Works in a single process run; LOST on kill+resume.
+    private readonly List&lt;ProbeResult&gt; _collected = [];
+
+    public override async ValueTask HandleAsync(
+        ProbeResult result, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        _collected.Add(result);  // ← vanishes on restart
+
+        if (_collected.Count &lt; ExpectedProbes)
+            return;
+
+        var days = await context.ReadStateAsync&lt;int&gt;("days", scopeName: "investigation", cancellationToken);
+        var costSpike = DetectCostSpike(_collected.FirstOrDefault(p =&gt; p.Name == "cost-trend")?.Rows);
+        var findings = new Findings(days, _collected, costSpike, []);
+
+        await context.QueueStateUpdateAsync("findings", findings, scopeName: "investigation", cancellationToken);
+        await context.SendMessageAsync(findings, cancellationToken: cancellationToken);
+    }
+}</code></pre>
+                  </div>
+                </div>
+
+                <div class="tab-panel">
+                  <p>
+                    <strong>1 · 列表放上下文，不放字段。</strong>
+                    <code>ReadOrInitStateAsync</code>
+                    首次返回空表，恢复时返回检查点里的表；
+                    每次添加后写回。所以计数能扛重启，这是 v2
+                    的主要修复。不足三个探针就返回等待。
+                  </p>
+                  <div class="codewrap">
+                    <div class="code-meta">
+                      <span class="filename"
+                        >Workflows/InvestigationExecutors.cs — ValidatorExecutor
+                        v2（1 / 4）：持久累积</span
+                      >
+                    </div>
+                    <pre
+                      class="code-block"
+                    ><code>[SendsMessage(typeof(DeepDiveRequest))]
+[SendsMessage(typeof(Findings))]
+public sealed class ValidatorExecutor() : Executor&lt;ProbeResult&gt;("validator")
+{
+    private const int ExpectedProbes = 3;
+
+    public override async ValueTask HandleAsync(
+        ProbeResult result, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        var collected = await context.ReadOrInitStateAsync("collected", () =&gt; new List&lt;ProbeResult&gt;(), cancellationToken)
+            ?? [];
+        collected.Add(result);
+        await context.QueueStateUpdateAsync("collected", collected, cancellationToken);
+
+        if (collected.Count &lt; ExpectedProbes)
+            return;</code></pre>
+                  </div>
+
+                  <p>
+                    <strong>2 · 凑齐后构建 findings。</strong>
+                    <code>days</code> 来自共享作用域（PlanExecutor 在步骤 2
+                    写的）； cost-trend 行喂给激增检测。findings
+                    写回共享作用域，供深挖分支稍后读取， 不必再跑验证器。
+                  </p>
+                  <div class="codewrap">
+                    <div class="code-meta">
+                      <span class="filename"
+                        >ValidatorExecutor v2（2 / 4）：构建并暂存
+                        findings</span
+                      >
+                    </div>
+                    <pre class="code-block"><code>        var notes = collected
+            .Where(probe =&gt; !probe.HasData)
+            .Select(probe =&gt; $"Probe '{probe.Name}' returned no usable numbers — finding rejected, not interpreted.")
+            .ToList();
+
+        var days = await context.ReadStateAsync&lt;int&gt;("days", scopeName: "investigation", cancellationToken);
+        var costSpike = DetectCostSpike(collected.FirstOrDefault(probe =&gt; probe.Name == "cost-trend")?.Rows);
+        var findings = new Findings(days, collected, costSpike, notes);
+
+        await context.QueueStateUpdateAsync("findings", findings, scopeName: "investigation", cancellationToken);</code></pre>
+                  </div>
+
+                  <p>
+                    <strong>3 · 两个出口。</strong>有成本激增就发
+                    <code>DeepDiveRequest</code> 给深挖分支；否则把 findings
+                    发给合成。
+                  </p>
+                  <div class="codewrap">
+                    <div class="code-meta">
+                      <span class="filename"
+                        >ValidatorExecutor v2（3 / 4）：按激增分支</span
+                      >
+                    </div>
+                    <pre class="code-block"><code>        if (costSpike)
+        {
+            await context.SendMessageAsync(new DeepDiveRequest(
+                "The latest day's cost is well above the window average. Deep dive into the most expensive sessions?"),
+                cancellationToken: cancellationToken);
+            return;
+        }
+
+        await context.SendMessageAsync(findings, cancellationToken: cancellationToken);
+    }</code></pre>
+                  </div>
+
+                  <p>
+                    <strong>4 · 激增检测。</strong>纯函数，读 cost-trend 行。
+                    最后一天高于前几天均值 1.5 倍就标记；只有一天数据则超 $5
+                    标记。 独立出来，方便不启动工作流就单测。
+                  </p>
+                  <div class="codewrap">
+                    <div class="code-meta">
+                      <span class="filename"
+                        >ValidatorExecutor v2（4 / 4）：DetectCostSpike
+                        辅助方法</span
+                      >
+                    </div>
+                    <pre
+                      class="code-block"
+                    ><code>    private static bool DetectCostSpike(string? costTrendRows)
+    {
+        if (costTrendRows is null) return false;
+
+        var costs = costTrendRows.Split('\n').Skip(1)
+            .Select(line =&gt; line.Split('\t'))
+            .Where(cells =&gt; cells.Length &gt;= 2
+                &amp;&amp; double.TryParse(cells[1], System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out _))
+            .Select(cells =&gt; double.Parse(cells[1], System.Globalization.CultureInfo.InvariantCulture))
+            .ToList();
+
+        if (costs.Count == 0) return false;
+        var last = costs[^1];
+        if (costs.Count == 1) return last &gt; 5;
+
+        var priorAverage = costs[..^1].Average();
+        return last &gt; priorAverage * 1.5;
+    }
+}</code></pre>
+                  </div>
+                </div>
+              </div>
+
+              <p>
+                关键区别：<code>collected</code>
+                现在每次调用都从上下文读。所以进程在超步间被杀，
+                也能从检查点恢复回来。不用任何字段。
+              </p>
+            </li>
+
+            <li>
+              <h3>步骤 2 — 在 PlanExecutor 和 ProbeExecutor 写入上下文状态</h3>
+              <p>
+                每个方法体只加一行，其余同 B3。第一行加到
+                <code>PlanExecutor.HandleAsync</code>（<code>Math.Clamp</code>
+                之后、<code>ProbeJob[]</code> 之前），发布 <code>"days"</code>
+                供验证器恢复后读取。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs —
+                    PlanExecutor.HandleAsync</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>await context.QueueStateUpdateAsync("days", days, scopeName: "investigation", cancellationToken);</code></pre>
+              </div>
+              <p>
+                第二行加到 <code>ProbeExecutor.HandleAsync</code>（<code
+                  >rows</code
+                >
+                设好后、<code>SendMessageAsync</code>
+                之前），把每个探针的原始行按
+                <code>"probe:{name}"</code>
+                存入共享作用域，供深挖分支恢复后读取。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs —
+                    ProbeExecutor.HandleAsync</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>await context.QueueStateUpdateAsync($"probe:{job.Name}", rows, scopeName: "investigation", cancellationToken);</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>
+                步骤 3 — 扩展来自 B2 的
+                <code>InvestigationService</code> 以加入检查点
+              </h3>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 说明</span>
+                <p>
+                  打开 B2 创建的
+                  <code>Workflows/InvestigationService.cs</code>，不要新建文件。
+                  本文件需新增
+                  <code>using Microsoft.Agents.AI.Workflows.Checkpointing;</code
+                  >。 <code>WorkflowEventDto</code> 与
+                  <code>InvestigationStatus</code>
+                  已在 B2 定义，勿重复。
+                </p>
+              </div>
+
+              <p>
+                <strong>1 · 字段。</strong>工厂每次运行造一个新
+                <code>Workflow</code>； 三个检查点字段负责保存和定位快照；<code
+                  >_pending</code
+                >
+                把 runId 映射到
+                运行加上当前阻塞它的请求——这一对就是元组加宽的原因。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — 字段</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>public sealed class InvestigationService
+{
+    private readonly Func&lt;Workflow&gt; _workflowFactory;
+    private readonly CheckpointManager _checkpointManager;
+    private readonly FileSystemJsonCheckpointStore _store;
+    private readonly DirectoryInfo _checkpointDir;
+    private readonly ILogger&lt;InvestigationService&gt; _logger;
+    private readonly ConcurrentDictionary&lt;string, (StreamingRun Run, ExternalRequest Request)&gt; _pending = new();</code></pre>
+              </div>
+
+              <p>
+                <strong>2 · 构造函数接好检查点。</strong
+                >确保目录存在，建文件存储， 包成 JSON
+                <code>CheckpointManager</code>。<code>Workflow</code>
+                存为工厂而非实例—— 一个 <code>Workflow</code> 只能被一个 runner
+                持有，每次运行和恢复都要新的。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — 构造函数</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    public InvestigationService(IConfiguration config, Tools.ClickHouseClient clickHouse, ILogger&lt;InvestigationService&gt; logger)
+    {
+        _logger = logger;
+        var dir = new DirectoryInfo(config["CHECKPOINT_DIR"] ?? "checkpoints");
+        dir.Create();
+        _checkpointDir = dir;
+        _store = new FileSystemJsonCheckpointStore(dir);
+        _checkpointManager = CheckpointManager.CreateJson(_store, null);
+        _workflowFactory = () =&gt; InvestigationWorkflow.Build(config, clickHouse);
+    }</code></pre>
+              </div>
+
+              <p>
+                <strong>3 · 启动与进程内响应。</strong
+                ><code>StartAsync</code> 开新运行并经
+                <code>CheckpointManager</code> 写快照，再交给
+                <code>DriveAsync</code>。<code>RespondAsync</code>
+                在运行还活着时回应审批； 没有句柄（如重启后）返回
+                <code>null</code>，让路由改用 <code>/resume</code>。
+                类先不闭合，步骤 4 补齐剩余成员和右花括号。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — StartAsync +
+                    RespondAsync</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    public async Task&lt;InvestigationStatus&gt; StartAsync(int days, CancellationToken ct)
+    {
+        var runId = Guid.NewGuid().ToString("N");
+        var run = await InProcessExecution.RunStreamingAsync(
+            _workflowFactory(), new InvestigationRequest(days), _checkpointManager, runId, ct);
+        return await DriveAsync(runId, run, [], ct);
+    }
+
+    public async Task&lt;InvestigationStatus?&gt; RespondAsync(string runId, bool approve, CancellationToken ct)
+    {
+        if (!_pending.TryRemove(runId, out var pending))
+            return null;
+
+        await pending.Run.SendResponseAsync(pending.Request.CreateResponse(new DeepDiveDecision(approve)));
+        return await DriveAsync(runId, pending.Run, [], ct);
+    }</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>
+                步骤 4 — 向 <code>InvestigationService</code> 添加
+                <code>ResumeAsync</code>、<code>DriveAsync</code> 及辅助方法
+              </h3>
+              <p>
+                这四个成员加到步骤 3 的同一个类里，放在
+                <code>RespondAsync</code>
+                之后，然后闭合类。
+              </p>
+
+              <p>
+                <strong>1 · ResumeAsync。</strong
+                >加载该运行最新检查点并继续。两个坑： 索引含所有运行，要按 runId
+                过滤；检查点 id 是无序随机值，要按文件写入时间排序。 无匹配返回
+                <code>null</code>，路由回 404。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — ResumeAsync</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    public async Task&lt;InvestigationStatus?&gt; ResumeAsync(string runId, CancellationToken ct)
+    {
+        var mine = (await _store.RetrieveIndexAsync(runId, null))
+            .Where(checkpoint =&gt; checkpoint.SessionId == runId)
+            .Select(checkpoint =&gt; (Info: checkpoint, WrittenAt: CheckpointWrittenAt(runId, checkpoint)))
+            .OrderBy(entry =&gt; entry.WrittenAt)
+            .ToList();
+
+        if (mine.Count == 0)
+            return null;
+
+        _pending.TryRemove(runId, out _);
+        var run = await InProcessExecution.ResumeStreamingAsync(_workflowFactory(), mine[^1].Info, _checkpointManager, ct);
+        return await DriveAsync(runId, run, [new("resumed", $"from checkpoint {mine.Count} of run {runId}")], ct);
+    }</code></pre>
+              </div>
+
+              <p>
+                <strong>2 · CheckpointWrittenAt。</strong
+                >小工具，找到检查点对应的文件 并返回它的最后写入时间，供
+                <code>ResumeAsync</code> 排序。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs —
+                    CheckpointWrittenAt</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    private DateTime CheckpointWrittenAt(string runId, CheckpointInfo checkpoint)
+    {
+        var file = _checkpointDir.GetFiles($"{runId}_{checkpoint.CheckpointId}*").FirstOrDefault();
+        return file?.LastWriteTimeUtc ?? DateTime.MinValue;
+    }</code></pre>
+              </div>
+
+              <p>
+                <strong>3 · DriveAsync。</strong>Start、Respond、Resume
+                共用的循环。
+                逐个读事件、转成小状态对象、记录最终报告；出错则记日志并返回
+                failed。 审批暂停分支在 F2 才加。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — DriveAsync</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    private async Task&lt;InvestigationStatus&gt; DriveAsync(
+        string runId, StreamingRun run, List&lt;WorkflowEventDto&gt; events, CancellationToken ct)
+    {
+        string? report = null;
+        try
+        {
+            await foreach (var evt in run.WatchStreamAsync(ct))
+            {
+                var dto = ToDto(evt);
+                if (dto is not null) events.Add(dto);
+
+                if (evt is WorkflowOutputEvent output)
+                    report = output.Data?.ToString();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Investigation run {RunId} failed.", runId);
+            events.Add(new("error", ex.Message));
+            return new InvestigationStatus(runId, "failed", null, null, events);
+        }
+
+        return new InvestigationStatus(runId, report is null ? "failed" : "completed", report, null, events);
+    }</code></pre>
+              </div>
+
+              <p>
+                <strong>4 · ToDto。</strong>把每个工作流事件映射成 API
+                用的小对象。 审批和端口分支在 F2
+                加。这是最后一个成员，之后闭合类。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs —
+                    ToDto（之后闭合类）</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    private static WorkflowEventDto? ToDto(WorkflowEvent evt) =&gt; evt switch
+    {
+        WorkflowStartedEvent =&gt; new("workflow_started", null),
+        SuperStepCompletedEvent =&gt; new("superstep_completed", null),
+        ExecutorInvokedEvent invoked =&gt; new("executor_invoked", invoked.ExecutorId),
+        ExecutorCompletedEvent completed =&gt; new("executor_completed", completed.ExecutorId),
+        ExecutorFailedEvent failed =&gt; new("executor_failed",
+            $"{failed.ExecutorId}: {(failed.Data as Exception)?.GetBaseException().Message ?? failed.Data?.ToString()}"),
+        InvestigationProgressEvent progress =&gt; new("progress", progress.Message),
+        WorkflowOutputEvent =&gt; new("workflow_output", "report ready"),
+        _ =&gt; null,
+    };
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>步骤 5 — 在 <code>Program.cs</code> 中暴露 HTTP 端点</h3>
+              <p>
+                这三条路由就是完整的运行生命周期。<code>/investigate</code>
+                开始一次运行；
+                <code>/respond</code> 在运行还活着时回应审批；<code
+                  >/resume</code
+                >
+                重启后从磁盘最新检查点继续。最后一条用来验证运行确实能扛重启。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — 加入 DI 注册（app.Build() 之前）</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddSingleton&lt;InvestigationService&gt;();</code></pre>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — 加入路由（app.Build() 之后、app.Run()
+                    之前）</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/workflow/investigate", async (InvestigateRequest? request, InvestigationService service, CancellationToken ct) =&gt;
+    Results.Ok(await service.StartAsync(request?.Days ?? 7, ct)));
+
+app.MapPost("/workflow/{runId}/respond", async (string runId, WorkflowRespondRequest request,
+    InvestigationService service, CancellationToken ct) =&gt;
+{
+    var status = await service.RespondAsync(runId, request.Approve, ct);
+    return status is null
+        ? Results.NotFound(new { error = "no run awaiting approval with that id (after a restart, use /resume)" })
+        : Results.Ok(status);
+});
+
+app.MapPost("/workflow/{runId}/resume", async (string runId, InvestigationService service, CancellationToken ct) =&gt;
+{
+    var status = await service.ResumeAsync(runId, ct);
+    return status is null
+        ? Results.NotFound(new { error = "no checkpoints found for that run id" })
+        : Results.Ok(status);
+});</code></pre>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — 在文件作用域加入请求 record（app.Run()
+                    之后）</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>internal sealed record InvestigateRequest(int Days);
+internal sealed record WorkflowRespondRequest(bool Approve);</code></pre>
+              </div>
+            </li>
+          </ol>
+
+          <div class="callout callout--evolution">
+            <span class="callout-label">🔄 演进脉络</span>
+            <p>
+              <strong>为什么先给坏版本。</strong>步骤 1 的 v1
+              只是示例，不会进入最终构建——只有 v2 会发布。
+              先看错的版本，才能看清确切问题：单进程测试全绿，停了再恢复却给出错误或空结果，
+              而且没有报错。看着能跑的代码在恢复时失败，更容易记住规则。
+            </p>
+            <p>
+              本课还首次预演三个生产陷阱：存储索引覆盖所有运行、检查点 id
+              无序、一个
+              <code>Workflow</code> 只能有一个持有者。你会在
+              <a href="../lesson17/index.html"
+                >F2 — 深度调查：HITL 端口 + 生产检查点</a
+              >中完整用到它们，届时同一条流水线会加入人工审批，并对接真实遥测数据。
+            </p>
+          </div>
+
+          <h2>两个作用域如何协同工作</h2>
+          <p>
+            共享作用域 <code>"investigation"</code> 对每个执行器都可见：
+            <code>PlanExecutor</code> 写 <code>"days"</code>，每个
+            <code>ProbeExecutor</code> 写 <code>"probe:{name}"</code>，
+            <code>ValidatorExecutor</code> 读 <code>"days"</code> 写
+            <code>"findings"</code>，激增时 <code>DeepDiveExecutor</code> 读
+            <code>"findings"</code>。私有作用域（无 <code>scopeName</code>）只放
+            <code>"collected"</code>，归 <code>ValidatorExecutor</code> 独有。
+            每个值放最窄的作用域，避免执行器间意外耦合。
+          </p>
+          <div class="callout callout--note">
+            <span class="callout-label">ℹ️</span>
+            <p>
+              下面拓展 B3 的
+              <code>DeepDiveExecutor</code> 桩，不是新类型。它从共享作用域读
+              <code>"findings"</code>；完整的高开销查询主体在 F2（第 17
+              课）加入。 <code>Findings</code>、<code>DeepDiveRequest</code>、
+              <code>DeepDiveDecision</code> 都在 B3 定义，勿重复。
+            </p>
+          </div>
+          <div class="codewrap">
+            <div class="code-meta">
+              <span class="filename"
+                >Workflows/InvestigationExecutors.cs — DeepDiveExecutor
+                从共享作用域读 "findings"（拓展 B3 的桩）</span
+              >
+            </div>
+            <pre
+              class="code-block"
+            ><code>public sealed class DeepDiveExecutor(ClickHouseClient clickHouse) : Executor&lt;DeepDiveDecision&gt;("deepdive")
+{
+    public override async ValueTask HandleAsync(
+        DeepDiveDecision decision, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        var findings = await context.ReadStateAsync&lt;Findings&gt;("findings", scopeName: "investigation", cancellationToken)
+            ?? new Findings(7, [], false, ["Findings state was missing."]);
+
+        if (!decision.Approve)
+        {
+            findings.ValidationNotes.Add("A cost spike was detected but the deep dive was declined by the user.");
+            await context.SendMessageAsync(findings, cancellationToken: cancellationToken);
+            return;
+        }
+    }
+}</code></pre>
+          </div>
+
+          <h2>验证</h2>
+          <div class="gate">
+            <p class="gate-title">✅ 关卡 — 未变绿前不要前进</p>
+
+            <p>
+              <strong>1. 启动运行并抓住早期检查点。</strong
+              ><code>/investigate</code>
+              会跑完才返回，所以无法从 curl 端中断。改在第二个终端盯
+              <code>checkpoints/</code> 文件夹，第一个文件一出现就 Ctrl+C
+              停服务。 要停得早：此时磁盘上最新的检查点是 plan 之后、synthesis
+              之前的部分快照，
+              恢复才还有活干、才会产出报告。若让它跑完，只剩最终检查点，恢复就什么都不产出。
+            </p>
+            <div class="codewrap">
+              <pre class="code-block"><code># 终端 1 — 启动服务，再启动运行：
+dotnet run -- --environment Testing
+curl -s -X POST "http://localhost:8124/workflow/investigate" \
+  -H "Content-Type: application/json" -d '{"days":7}'
+
+# 终端 2 — 盯第一个文件出现，然后停掉终端 1（Ctrl+C）：
+ls checkpoints/
+# 文件形如：96d437ca5603472f8e2b571bfc70679a_&lt;guid&gt;.json
+# runId 是下划线前面那段。</code></pre>
+            </div>
+
+            <p>
+              <strong>2. 重启并恢复。</strong>再次启动服务，用从文件名复制的
+              runId 调 <code>/resume</code>。
+            </p>
+            <div class="codewrap">
+              <pre class="code-block"><code>dotnet run -- --environment Testing
+curl -s -X POST "http://localhost:8124/workflow/&lt;runId&gt;/resume" | jq '{status, report}'</code></pre>
+            </div>
+
+            <p>
+              <strong>预期：</strong><code>status</code> 为
+              <code>"completed"</code>，<code>report</code> 非空。events 以
+              <code>"resumed"</code> 开头，例如
+              <code>"from checkpoint 1 of run &lt;runId&gt;"</code>。恢复后的
+              events 里没有 <code>"plan"</code>——plan
+              已存进检查点，恢复跳过它，从探针继续。
+            </p>
+
+            <p>
+              <strong>反向测试 — 未知 runId 返回 404，而不是崩溃：</strong>
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -o /dev/null -w "%{http_code}" \
+  -X POST "http://localhost:8124/workflow/notavalidrunid/resume"
+# Must print: 404</code></pre>
+            </div>
+
+            <p>
+              <strong>需要留意：</strong>若保留 v1 实例字段版本，恢复会返回
+              <code>status: "failed"</code> 或零发现的报告，验证器到不了三项。
+              切到 v2（<code>ReadOrInitStateAsync</code> 和
+              <code>QueueStateUpdateAsync</code
+              >）再跑，直接运行和杀死+恢复必须给出相同报告。
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ 常见坑</span>
+            <ul>
+              <li>
+                <strong>恢复返回空或部分报告，且没有报错</strong>
+                → 状态放在了实例字段而非上下文。改用
+                <code>ReadOrInitStateAsync</code> +
+                <code>QueueStateUpdateAsync</code>。
+              </li>
+              <li>
+                <strong>"Already owned by another runner" 异常</strong>
+                → 同一个 <code>Workflow</code> 被传给两个并发的
+                <code>RunStreamingAsync</code>。用
+                <code>Func&lt;Workflow&gt;</code>
+                工厂，每次运行/恢复只调一次。
+              </li>
+              <li>
+                <strong>运行已完成，恢复却找不到任何检查点</strong>
+                → 没把 <code>CheckpointManager</code> 传给
+                <code>RunStreamingAsync</code>（无 manager
+                的重载会静默跳过检查点）。
+              </li>
+              <li>
+                <strong>恢复加载了错误运行的状态</strong>
+                → 存储索引在所有运行间全局。选最新检查点前，先用
+                <code>checkpoint.SessionId == runId</code> 过滤。
+              </li>
+              <li>
+                <strong>实例字段能通过每个单进程测试</strong>
+                → 这正是陷阱。CI
+                绿不代表恢复安全；失败只在进程于两个超步间被杀时才显现。
+              </li>
+              <li>
+                <strong>已完成的运行去恢复，结果没有报告</strong>
+                →
+                停得太晚，磁盘上只剩最终检查点。恢复加载它，没有剩余工作可做，就不产出报告。
+                改在第一个检查点文件出现时就停。
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              标记本课完成
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

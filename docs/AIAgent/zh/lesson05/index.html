@@ -1,0 +1,627 @@
+<!doctype html>
+<!-- lesson05/index.html — B2: Watching the graph: workflow events -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>B2 · 工作流事件 — MAF 课程</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="05">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">课程</a> / 模块 B / B2
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">第 05 课 · B2 · 模块 B — 图</p>
+            <h1>观察图的运行：工作流（workflow）事件</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★</span>
+              <span class="badge badge--cost">无需 LLM</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>你将学到什么</h2>
+          <p>
+            一次 Claudalytics Copilot investigation
+            在图里要跑很多步：规划探针、运行、校验、写报告。没有
+            event，你看不到哪个 probe 在跑、为什么某个失败，也无法把进度推给
+            UI。运行结束之前，整个过程就是一个黑盒。
+          </p>
+          <p>
+            每次 workflow 运行都会发出一条带类型的实时 event
+            流，你从手头已有的同一个
+            <code>StreamingRun</code> 上读取它。本课你将搭建一个 driver
+            读取这条流，在产出结果的同时生成事件时间线，并学会从 executor
+            内部发出自己的 event。学完 B2，你就有了一扇随图运行的调试窗口。
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 讲解</span>
+            <h3>内置的事件流</h3>
+            <p>
+              当你调用
+              <code>InProcessExecution.RunStreamingAsync(…)</code>
+              时，会拿回一个 <code>StreamingRun</code>。在它上面调用
+              <code>run.WatchStreamAsync(ct)</code>，即可得到一个
+              <code>IAsyncEnumerable&lt;WorkflowEvent&gt;</code
+              >。框架会自动发出下面这些具体子类型：
+            </p>
+            <ul>
+              <li>
+                <strong><code>WorkflowStartedEvent</code></strong> —
+                运行已经开始。
+              </li>
+              <li>
+                <strong
+                  ><code>SuperStepStartedEvent</code> /
+                  <code>SuperStepCompletedEvent</code></strong
+                >
+                — 一次前沿（frontier）推进：一批同时触发的并发节点（node）。
+              </li>
+              <li>
+                <strong><code>ExecutorInvokedEvent</code></strong> —
+                一个命名的执行器（executor）即将运行；携带
+                <code>ExecutorId</code>。
+              </li>
+              <li>
+                <strong><code>ExecutorCompletedEvent</code></strong> —
+                该执行器正常结束。
+              </li>
+              <li>
+                <strong><code>ExecutorFailedEvent</code></strong> —
+                执行器抛出了异常；异常对象就在 <code>evt.Data</code> 里。调用
+                <code>.GetBaseException().Message</code> 把根因暴露出来——默认的
+                <code>.ToString()</code> 会是一大堵堆栈墙。
+              </li>
+              <li>
+                <strong><code>WorkflowOutputEvent</code></strong> — 某个
+                <code>[YieldsOutput]</code> 执行器产出了最终结果；从
+                <code>evt.Data</code> 读取它。
+              </li>
+              <li>
+                <strong><code>RequestInfoEvent</code></strong> —
+                运行被暂停，正等待人工回应（在
+                <a href="../lesson17/index.html">F2</a> 中完整讲解）。
+              </li>
+            </ul>
+            <h3>从执行器（executor）内部发出自定义事件</h3>
+            <p>
+              任何执行器都可以调用
+              <code>await context.AddEventAsync(new MyEvent(…), ct)</code
+              >。该事件会出现在事件流里，位于其外层的
+              <code>ExecutorInvokedEvent</code> 与
+              <code>ExecutorCompletedEvent</code> 之间。你的自定义类必须继承
+              <code>WorkflowEvent</code
+              >，并把它的负载（payload）传给基类构造函数。
+            </p>
+          </div>
+
+          <h2>事件如何映射到你在 B1 里构建的图</h2>
+          <p>
+            回顾
+            <a href="../lesson04/index.html">B1</a>
+            中的流水线：一个规划器（planner）节点（node）扇出（fan-out）三个探针（probe）任务，三个探针执行器（executor）并行运行，一个扇入屏障（fan-in
+            barrier）把结果汇给收集器（collector），随后产出输出。事件流让这套结构在
+            <em>运行时变得可见</em>：
+          </p>
+          <ul>
+            <li>
+              三个探针执行器的 <code>ExecutorInvokedEvent</code> 共享
+              <em>同一对</em>
+              <code>SuperStepStartedEvent</code> /
+              <code>SuperStepCompletedEvent</code>
+              括号——这证明扇出的并行是真实存在的。
+            </li>
+            <li>
+              收集器的 <code>ExecutorInvokedEvent</code> 只会在三个探针的
+              <code>ExecutorCompletedEvent</code>
+              全部出现之后才登场——这正是扇入屏障在落实它"等待全部完成"的契约。
+            </li>
+            <li>
+              如果你弄坏某个探针的 SQL，一个
+              <code>ExecutorFailedEvent</code>
+              会指名道姓地点出是哪个执行器，并携带异常——无需猜哪个节点失败了。
+            </li>
+          </ul>
+
+          <h2>动手构建</h2>
+          <ol class="steps">
+            <li>
+              <h3>定义自定义进度事件</h3>
+              <p>
+                继承
+                <code>WorkflowEvent</code
+                >，带上一个字符串负载。把消息传给基类构造函数（框架会存储它），同时也把它暴露成一个带类型的属性，这样消费方的代码就不必去强转
+                <code>Data</code>。
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 放置位置</span>
+                <p>
+                  文件：<code>Workflows/InvestigationModels.cs</code> —
+                  这个文件在
+                  <a href="../lesson04/index.html">B1</a>
+                  里就已经存在，顶部以
+                  <code>using Microsoft.Agents.AI.Workflows;</code> 开头，下面是
+                  <code>namespace AiAgent.Workflows;</code>。
+                  <strong
+                    >把下面这个类追加到同一个
+                    <code>namespace AiAgent.Workflows</code> 块内部</strong
+                  >，放在已有的 record 声明之后。无需新增 NuGet——
+                  <code>Microsoft.Agents.AI.Workflows</code> 在 B1
+                  里就已经加好了。
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Workflows/InvestigationModels.cs</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>/// &lt;summary&gt;Custom workflow event — executors narrate their progress with these.&lt;/summary&gt;
+public sealed class InvestigationProgressEvent(string message) : WorkflowEvent(message)
+{
+    public string Message { get; } = message;
+}</code></pre>
+              </div>
+              <p>
+                正是这次对基类构造函数的调用，把事件路由进了
+                <code>WatchStreamAsync</code
+                >。没有它，对象虽然存在，事件流却永远看不到它。
+              </p>
+            </li>
+
+            <li>
+              <h3>从 executor 发出自定义事件</h3>
+              <p>
+                在任意 executor 的
+                <code>HandleAsync</code> 里，用你的事件实例调用
+                <code>context.AddEventAsync</code>。planner 宣布要跑几个
+                probe，每个 probe 开始时也宣布一声。这两条 event 落进
+                <code>DriveAsync</code>
+                稍后读取的同一条流，所以进度会出现在时间线里。
+              </p>
+              <p>
+                第一行加在 <code>PlanExecutor.HandleAsync</code>，在 clamp
+                <code>days</code> 之后的第一行：
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs — in
+                    PlanExecutor.HandleAsync</span
+                  >
+                </div>
+                <pre class="code-block"><code>await context.AddEventAsync(
+    new InvestigationProgressEvent($"Planning {days}-day investigation: 3 probes."),
+    cancellationToken);</code></pre>
+              </div>
+              <p>
+                第二行加在 <code>ProbeExecutor.HandleAsync</code>，在 ClickHouse
+                调用之前：
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs — in
+                    ProbeExecutor.HandleAsync</span
+                  >
+                </div>
+                <pre class="code-block"><code>await context.AddEventAsync(
+    new InvestigationProgressEvent($"Probe '{job.Name}' running."),
+    cancellationToken);</code></pre>
+              </div>
+              <p>
+                B3 里加入的 validator 与 synthesis
+                节点也用同样方式发进度：从它们的
+                <code>HandleAsync</code> 内部把新的
+                <code>InvestigationProgressEvent</code> 传给
+                <code>context.AddEventAsync</code>。
+              </p>
+            </li>
+
+            <li>
+              <h3>添加 WorkflowEventDto record</h3>
+              <p>
+                原始的
+                <code>WorkflowEvent</code> 体系是一个内部类型。在把它返回给 HTTP
+                调用方、或缓冲进时间线之前，先把它映射成一个简单的 record。这个
+                record
+                处于命名空间作用域——在类之外——这样同命名空间里的任何文件都能用到它。
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 放置位置</span>
+                <p>
+                  文件：<code>Workflows/InvestigationService.cs</code>。B2
+                  创建这个文件——它目前还不存在。先从下面这个最小骨架开始，然后在后续步骤里逐步加入类型与方法：
+                </p>
+                <pre
+                  class="code-block"
+                  style="margin: 0.5rem 0"
+                ><code>using Microsoft.Agents.AI.Workflows;
+
+namespace AiAgent.Workflows;
+
+// &lt;-- add WorkflowEventDto HERE (namespace scope, before the class)
+
+public sealed class InvestigationService(
+    Func&lt;Workflow&gt; workflowFactory, ILogger&lt;InvestigationService&gt; logger)
+{
+    private readonly Func&lt;Workflow&gt; _workflowFactory = workflowFactory;
+    private readonly ILogger&lt;InvestigationService&gt; _logger = logger;
+    // &lt;-- add InvestigationStatus HERE (still namespace scope, can go above or below the class)
+    // &lt;-- add ToDto, DriveAsync, StartAsync INSIDE this class
+}</code></pre>
+                <p>
+                  <strong>无需新增 NuGet</strong>——
+                  <code>Microsoft.Agents.AI.Workflows</code> 在 B1
+                  里就已经加好了。检查点（checkpoint）支持在 B4
+                  里加入；暂时不要导入
+                  <code>Microsoft.Agents.AI.Workflows.Checkpointing</code>。
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs —
+                    位于命名空间作用域，类之前</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>/// &lt;summary&gt;One simplified workflow event, as returned to HTTP clients.&lt;/summary&gt;
+public sealed record WorkflowEventDto(string Type, string? Detail);</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>添加 ToDto — 把原始事件映射成 DTO</h3>
+              <p>
+                把 <code>ToDto</code> 作为 <code>private static</code> 方法加到
+                <code>InvestigationService</code> 内部。下一步的
+                <code>DriveAsync</code> 会读它：流里每个原始 event 都先经过
+                <code>ToDto</code> 再进时间线。用 switch
+                表达式逐一处理，未处理的类型返回 <code>null</code> 被跳过。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — 位于
+                    InvestigationService 内部</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>/// &lt;summary&gt;The raw-event-stream lesson, flattened for JSON/SSE consumers.&lt;/summary&gt;
+private static WorkflowEventDto? ToDto(WorkflowEvent evt) =&gt; evt switch
+{
+    WorkflowStartedEvent                   =&gt; new("workflow_started", null),
+    SuperStepStartedEvent                  =&gt; null,
+    SuperStepCompletedEvent                =&gt; new("superstep_completed", null),
+    ExecutorInvokedEvent invoked           =&gt; new("executor_invoked",   invoked.ExecutorId),
+    ExecutorCompletedEvent completed       =&gt; new("executor_completed", completed.ExecutorId),
+    ExecutorFailedEvent failed             =&gt; new("executor_failed",
+        $"{failed.ExecutorId}: {(failed.Data as Exception)?.GetBaseException().Message ?? failed.Data?.ToString()}"),
+    InvestigationProgressEvent progress    =&gt; new("progress",          progress.Message),
+    WorkflowOutputEvent                    =&gt; new("workflow_output",    "report ready"),
+    _                                      =&gt; null,
+};</code></pre>
+              </div>
+              <p>
+                <code>SuperStepStartedEvent</code> 这一支返回
+                <code>null</code>，对 HTTP
+                客户端丢弃，因为它太频繁、只增噪声；它在 OTel
+                追踪里仍可见。原始事件流始终完整。
+              </p>
+              <p>
+                目前还没有 <code>RequestInfoEvent</code> 这一支，它是审批暂停
+                event。F2 引入 approval port 时再加它的分支，在此之前它落到
+                <code>_</code> 被跳过。
+              </p>
+            </li>
+
+            <li>
+              <h3>添加 InvestigationStatus 与 DriveAsync</h3>
+              <p>
+                <code>InvestigationStatus</code> 是返回给 HTTP 调用方的形状：run
+                id、status
+                字符串、报告文本和完整事件时间线。加到命名空间作用域，在类之外，与
+                <code>WorkflowEventDto</code> 放一起。<code>Status</code> 取
+                <code>running</code>、<code>completed</code> 或
+                <code>failed</code> 之一。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — 命名空间作用域 （在
+                    InvestigationService 之外）</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>/// &lt;summary&gt;HTTP-facing result of driving a run as far as it will go.&lt;/summary&gt;
+public sealed record InvestigationStatus(
+    string RunId,
+    string Status,
+    string? Report,
+    List&lt;WorkflowEventDto&gt; Events);</code></pre>
+              </div>
+              <p>
+                把 <code>DriveAsync</code> 作为 <code>private</code> 方法加到
+                <code>InvestigationService</code> 内部。它是事件流的消费者：用
+                <code>await foreach</code> 读每个 event，过
+                <code>ToDto</code>，加进 <code>events</code> 列表，并盯住
+                <code>WorkflowOutputEvent</code> 捕获最终报告。它填的列表正是
+                <code>StartAsync</code> 返回给
+                <code>/investigate</code> 端点的内容。HITL 暂停在 F2 里加入。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — 位于
+                    InvestigationService 内部</span
+                  >
+                </div>
+                <pre class="code-block"><code>/// &lt;summary&gt;
+/// Consumes the raw WorkflowEvent stream until the run produces output or ends.
+/// Human-in-the-loop pause (RequestInfoEvent) is wired in F2.
+/// &lt;/summary&gt;
+private async Task&lt;InvestigationStatus&gt; DriveAsync(
+    string runId, StreamingRun run, List&lt;WorkflowEventDto&gt; events, CancellationToken ct)
+{
+    string? report = null;
+    try
+    {
+        await foreach (var evt in run.WatchStreamAsync(ct))
+        {
+            var dto = ToDto(evt);
+            if (dto is not null) events.Add(dto);
+
+            if (evt is WorkflowOutputEvent output)
+                report = output.Data?.ToString();
+        }
+    }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex, "Investigation run {RunId} failed.", runId);
+        events.Add(new("error", ex.Message));
+        return new InvestigationStatus(runId, "failed", null, events);
+    }
+
+    return new InvestigationStatus(runId, report is null ? "failed" : "completed", report, events);
+}</code></pre>
+              </div>
+              <p>
+                循环 <em>await</em> 事件流：读取下一个 event
+                这个动作本身就在驱动运行前进，没有东西跑在你前面。图里再没有
+                node 可触发时流结束。B4 加 checkpoint 支持，F2 通过保存活跃 run
+                句柄并提前返回来处理审批暂停。
+              </p>
+            </li>
+
+            <li>
+              <h3>把 StartAsync 接到 DriveAsync</h3>
+              <p>
+                <code>StartAsync</code> 是 <code>/investigate</code> 端点调用的
+                <code>public</code> 入口，加到
+                <code>InvestigationService</code> 内部。它用
+                <code>_workflowFactory</code> 创建全新的
+                <code>StreamingRun</code>，带空事件列表交给
+                <code>DriveAsync</code>。这里是无 checkpoint 的重载，checkpoint
+                在 B4 加入。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationService.cs — 位于
+                    InvestigationService 内部</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>public async Task&lt;InvestigationStatus&gt; StartAsync(int days, CancellationToken ct)
+{
+    var runId = Guid.NewGuid().ToString("N");
+    var run = await InProcessExecution.RunStreamingAsync(
+        _workflowFactory(), new InvestigationRequest(days), runId, ct);
+    return await DriveAsync(runId, run, [], ct);
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>在 Program.cs 里注册 InvestigationService</h3>
+              <p>
+                把
+                <code>InvestigationService</code>
+                注册成单例（singleton），工厂构建 B1 的
+                <code>ProbeWorkflow</code>；B3 会把工厂改指向
+                <code>InvestigationWorkflow</code>。然后暴露
+                <code>/investigate</code> 端点，它是链条顶端的读取方：调用
+                <code>StartAsync</code>，把带完整事件时间线的
+                <code>InvestigationStatus</code> 作为 JSON 返回。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs — 服务注册</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddSingleton(sp =&gt;
+    new InvestigationService(
+        () =&gt; ProbeWorkflow.Build(sp.GetRequiredService&lt;ClickHouseClient&gt;()),
+        sp.GetRequiredService&lt;ILogger&lt;InvestigationService&gt;&gt;()));
+
+// ...
+
+app.MapPost("/investigate", async (int days, InvestigationService svc, CancellationToken ct) =&gt;
+    Results.Ok(await svc.StartAsync(days, ct)));</code></pre>
+              </div>
+            </li>
+          </ol>
+
+          <h2>为什么超步（superstep）能揭示并行</h2>
+          <p>
+            一个
+            <em>超步（superstep）</em>
+            就是一次前沿推进：所有输入消息已就绪的节点（node）都会在这一步内并发触发。在
+            B1/B2
+            的流水线里，三个探针（probe）执行器（executor）共享同一个超步，因为扇出（fan-out）的边（edge）会同时投递全部三条
+            <code>ProbeJob</code>
+            消息。事件流让这一结构性事实在运行时可被观察：去找三条连续的
+            <code>executor_invoked</code> 条目，它们对应的
+            <code>executor_completed</code> 条目全都落在同一个
+            <code>superstep_completed</code>
+            内。这就是免费的、可验证的并行，且零 LLM 成本。
+          </p>
+
+          <h2>验证</h2>
+          <div class="gate">
+            <p class="gate-title">✅ 关卡（gate） — 未变绿前不要前进</p>
+            <p>
+              用 Testing 环境启动智能体（agent），并向 investigation
+              端点（endpoint）发起 POST：
+            </p>
+            <div class="codewrap">
+              <pre class="code-block"><code>dotnet run -- --environment Testing
+# In another terminal:
+curl -s -X POST "http://localhost:8124/investigate?days=7" | jq '.events[].type'</code></pre>
+            </div>
+            <p>输出必须按顺序包含：</p>
+            <ul>
+              <li><code>"workflow_started"</code></li>
+              <li>针对 <code>plan</code> 的 <code>"executor_invoked"</code></li>
+              <li>
+                <code>"progress"</code> — "Planning 7-day investigation: 3
+                probes."
+              </li>
+              <li>
+                三条针对 <code>probe-0</code>、<code>probe-1</code>、
+                <code>probe-2</code> 的
+                <code>"executor_invoked"</code>
+                条目（同一超步（superstep）内的顺序是任意的）
+              </li>
+              <li>
+                三条 <code>"progress"</code> 条目，每个探针（probe）一条 —
+                "Probe '…' running."
+              </li>
+              <li>
+                针对 <code>collector</code> 的 <code>"executor_invoked"</code> —
+                只会在三个探针的 <code>"executor_completed"</code> 条目全部出现
+                <em>之后</em> 才登场（扇入屏障，fan-in barrier）
+              </li>
+              <li><code>"workflow_output"</code></li>
+            </ul>
+            <p>
+              检查这些探针执行器（executor）的调用是否共享一个超步：比较它们在
+              <code>events</code> 数组中的下标；三者都应落在同一对
+              <code>superstep_completed</code> 边界之间。
+            </p>
+            <p><strong>反向测试 — 让 executor-failed 暴露出来：</strong></p>
+            <p>
+              在 <code>ProbeExecutor.HandleAsync</code> 里故意写坏
+              SQL，查询一个不存在的表：
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>rows = await clickHouse.QueryAsync("SELECT * FROM nonexistent_table", cancellationToken);</code></pre>
+            </div>
+            <p>
+              重新跑 investigate 端点，events 数组里应出现一条
+              <code>executor_failed</code>：
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>{ "type": "executor_failed", "detail": "probe-0: Table nonexistent_table doesn't exist." }</code></pre>
+            </div>
+            <p>
+              运行会继续：其他 probe 照常触发，collector 仍收到坏 probe 的
+              <code>ProbeResult</code>（<code>hasData = false</code>）。
+            </p>
+            <p>
+              确认
+              <code>executor_failed</code>
+              携带的是基础异常消息（表名），不是完整堆栈。如果看到多行转储，说明
+              <code>ToDto</code> 里的
+              <code>GetBaseException().Message</code> 没有触及该事件，请重查
+              switch 里的 <code>ExecutorFailedEvent</code> 分支。
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ 常见坑</span>
+            <ul>
+              <li>
+                <strong
+                  ><code>executor_failed</code>
+                  显示的是一堵堆栈墙，而不是根因</strong
+                >
+                → <code>failed.Data</code> 是一个 <code>Exception</code>；要调用
+                <code>.GetBaseException().Message</code>，而不是
+                <code>.ToString()</code>。原始的
+                <code>ToString()</code>
+                会包含若干栈帧，把真正的错误埋在好几行运行时内部细节里面。
+              </li>
+              <li>
+                <strong>自定义事件从未出现在事件流里</strong>
+                → 你的类必须调用
+                <code>: WorkflowEvent(payload)</code>
+                ——正是这个基类构造函数才把对象注册进框架的事件总线（event
+                bus）。一个继承了
+                <code>WorkflowEvent</code>
+                但没有向基类构造函数传任何东西的类，会被构造出来，却永远不会被发出。
+              </li>
+              <li>
+                <strong>所有事件都在最后一次性到达，而不是逐步到达</strong>
+                → 你是在用 <code>ToListAsync()</code> 或
+                <code>.Result</code> 迭代，而不是
+                <code>await foreach</code
+                >。事件流必须以异步方式消费；阻塞式的一次性物化（materialisation）会破坏实时事件的契约。
+              </li>
+              <li>
+                <strong>事件流看起来是空的（完全没有事件）</strong>
+                → 你在监听的是一个与实际执行工作流（workflow）的那个不同的
+                <code>StreamingRun</code> 实例。一个常见原因是：第二次调用
+                <code>_workflowFactory()</code
+                >，然后去监听那个新句柄。记住：一个
+                <code>Workflow</code>
+                由恰好一个运行器（runner）所拥有——每次逻辑运行都重新构建（如工厂模式所保证的），但绝不要为同一次运行创建两个句柄。
+              </li>
+              <li>
+                <strong
+                  >看不到探针（probe）的并行（三个探针全是顺序执行）</strong
+                >
+                → 来自
+                <a href="../lesson04/index.html">B1</a>
+                的扇出（fan-out）边（edge）或分区器（partitioner）没有被沿用过来。确认工作流构建器仍然注册了全部三个探针执行器（executor）以及扇出边；超步（superstep）的分组是从边的接线中浮现出来的，而不是来自事件代码。
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              标记本课完成
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

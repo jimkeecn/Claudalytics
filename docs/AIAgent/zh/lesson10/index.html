@@ -1,0 +1,706 @@
+<!doctype html>
+<!-- lesson10/index.html — C3: Tool-level human approval -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>C3 · 工具级人工审批 — MAF 课程</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="10">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">课程</a> / 模块 C / C3
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">第 10 课 · C3 · 模块 C — 产品</p>
+            <h1>工具级人工审批</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★</span>
+              <span class="badge badge--cost">Haiku</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>你将学到什么</h2>
+          <p>
+            这个智能体里有一个危险工具：它能不带时间过滤地全表扫描
+            <code>otel_logs</code>，读数百万行、跑几分钟，在用户也许没打算
+            执行的请求上烧掉真金白银。<strong
+              >C3 把这一个工具放到人工审批关卡（gate）之后。</strong
+            >模型选中它时运行先暂停，没人批准前不碰数据库。
+          </p>
+          <p>
+            机制是一个包装器：把工具注册进
+            <code>ApprovalRequiredAIFunction</code>，而不是普通函数。模型选中后
+            框架不执行，而是发出
+            <code>ToolApprovalRequestContent</code> 并暂停。 服务器用生成的 id
+            存下待审批项，返回 <code>kind: "approval"</code>。 第二个端点
+            <code>POST /chat/approve</code> 落实决定：批准就把工具调用
+            重放进同一会话（session），拒绝就注入一条拒绝消息。每个审批只能用一次，
+            再用返回 404。关卡在单个工具上，不在工作流级别（那是
+            <a href="../lesson17/index.html">F2 的 <code>RequestPort</code></a
+            >）。
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 讲解</span>
+            <h3>工具级 HITL 的三个组成部分</h3>
+            <p>MAF 用三个协作部件实现工具审批。</p>
+            <ul>
+              <li>
+                <code>ApprovalRequiredAIFunction</code> —— 包装器，代替原始
+                <code>AIFunction</code>。模型选中被包装的工具时， 框架发出
+                <code>ToolApprovalRequestContent</code> 并暂停，不执行函数。
+              </li>
+              <li>
+                <code>ToolApprovalRequestContent</code> —— 暂停信号。携带原始
+                <code>ToolCall</code>（模型想发起的函数调用）， 并带一个
+                <code>CreateResponse(approved, reason)</code> 方法，
+                用来构造恢复（resume）运行的回复。
+              </li>
+              <li>
+                <code>agent.RunAsync(reply, session)</code> ——
+                把决定回灌。在同一会话上用一条
+                <code
+                  >ChatMessage(ChatRole.User,
+                  [pending.Request.CreateResponse(approved, reason)])</code
+                >
+                调用
+                <code>RunAsync</code>。批准则执行工具并继续；拒绝则灌入原因、
+                不执行工具直接作答。
+              </li>
+            </ul>
+            <p>
+              无需新库包，都在
+              <a href="../lesson09/index.html">C2</a> 已加的包里。 整个契约由
+              MAF 的 chat-client 层强制，它在工具调用到达你的代码前就拦截。
+            </p>
+          </div>
+
+          <h2>为什么无界限扫描需要一道关卡（gate）</h2>
+          <p>
+            <a href="../lesson08/index.html">C1</a> 里的
+            <code>SqlValidator</code> 要求每条 <code>otel_logs</code> 查询都带
+            <code>Timestamp</code>
+            过滤，因为它是大表。这是正确默认：全表扫描既贵又
+            通常没必要。但偶尔用户确实需要全时间段聚合（例如“从一开始到现在哪个项目
+            花得最多？”）。办法是再加一个工具
+            <code>RunUnboundedSql</code>，它跳过
+            时间过滤规则，但被一道人工关卡挡住。模型可以提议，人工必须批准。
+          </p>
+
+          <h2>动手实现</h2>
+          <ol class="steps">
+            <li>
+              <h3>把无界限 SQL 工具加进 SchemaTools</h3>
+              <p>
+                这就是关卡保护的工具。智能体读它的描述，仅在问题需要全表扫描时才调用。
+                加在已有的
+                <code
+                  >public sealed class SchemaTools(ClickHouseClient
+                  clickHouse)</code
+                >
+                内部，与 <code>RunSql</code> 并列，无需新增 using。
+              </p>
+              <p>
+                <code>RunUnboundedSql</code> 与
+                <code>RunSql</code> 只差一处：它调用
+                <code
+                  >SqlValidator.Validate(query, requireTimeFilter: false)</code
+                >，关掉时间过滤规则。其余防护照常：只读动词、单条语句、自动加
+                LIMIT。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Tools/SchemaTools.cs</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>[Description("Executes a read-only SELECT WITHOUT the otel_logs time-filter requirement. "
+           + "Use ONLY when a full-table scan is genuinely needed. "
+           + "Every call requires explicit human approval before it runs.")]
+public async Task&lt;string&gt; RunUnboundedSql(
+    [Description("The SELECT (or WITH ... SELECT) query to execute, "
+               + "may scan otel_logs without a Timestamp filter.")] string query)
+{
+    try
+    {
+        var sql = SqlValidator.Validate(query, requireTimeFilter: false);
+        return await clickHouse.QueryAsync(sql);
+    }
+    catch (Exception ex)
+    {
+        return $"QUERY FAILED: {ex.Message}";
+    }
+}</code></pre>
+              </div>
+              <p>
+                这里不改 <code>SqlValidator</code>。它的
+                <code>Validate</code> 从 C1 起就接受
+                <code>requireTimeFilter</code> 标志，你只是传
+                <code>false</code>。只读正则防护两个工具共用。
+              </p>
+              <p>
+                下面是 C1 之后的 <code>Validate</code> 供参考。类保持
+                <code>public static partial class SqlValidator</code>，
+                <code>[GeneratedRegex]</code> partial
+                方法保持不动。此处没有新增内容， 只是让你看清
+                <code>false</code> 路径跳过了什么。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Tools/SqlValidator.cs — Validate 方法（C1 起不变）</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>public static string Validate(string query, bool requireTimeFilter = true)
+{
+    var sql = query.Trim().TrimEnd(';').Trim();
+
+    if (sql.Contains(';'))
+        throw new ArgumentException("Only a single SQL statement is allowed.");
+
+    if (!SelectOrWith().IsMatch(sql))
+        throw new ArgumentException("Only SELECT (or WITH ... SELECT) queries are allowed.");
+
+    var denied = DeniedKeywords().Match(sql);
+    if (denied.Success)
+        throw new ArgumentException($"Keyword '{denied.Value}' is not allowed. This tool is read-only; FORMAT is appended automatically.");
+
+    if (requireTimeFilter &amp;&amp; TargetsOtelLogs().IsMatch(sql)
+        &amp;&amp; !sql.Contains("Timestamp", StringComparison.OrdinalIgnoreCase))
+        throw new ArgumentException(
+            "Queries against otel_logs must filter on Timestamp (it is a large table). " +
+            "Add e.g. WHERE Timestamp &gt;= now() - INTERVAL 1 DAY.");
+
+    if (!HasLimit().IsMatch(sql))
+        sql += $" LIMIT {DefaultLimit}";
+
+    return sql;
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>用 <code>ApprovalRequiredAIFunction</code> 包装该工具</h3>
+              <p>
+                这一步设下关卡。包装器让框架暂停而不执行。把
+                <code>RunUnboundedSql</code> 注册进
+                <code>new ApprovalRequiredAIFunction(...)</code
+                >，其他工具仍用普通
+                <code>AIFunctionFactory.Create</code
+                >。智能体按名字看到它，只有框架知道它被关卡管控。
+              </p>
+              <p>
+                替换 <code>AgentFactory.Create</code> 里的
+                <code>Tools = [...]</code> 块。
+                <code>using Microsoft.Agents.AI;</code> 从 A1 起就在，
+                <code>ApprovalRequiredAIFunction</code>
+                也在同一命名空间，无需新增 NuGet 包。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Agents/AgentFactory.cs</span>
+                </div>
+                <pre class="code-block"><code>Tools =
+[
+    AIFunctionFactory.Create(tools.GetSchema),
+    AIFunctionFactory.Create(tools.RunSql),
+    new ApprovalRequiredAIFunction(AIFunctionFactory.Create(tools.RunUnboundedSql)),
+    AIFunctionFactory.Create(tools.ListProjects),
+    AIFunctionFactory.Create(tools.ListRecentSessions),
+    AIFunctionFactory.Create(analysis.CostBreakdown),
+    AIFunctionFactory.Create(analysis.SessionDeepDive),
+],</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>把待审批项存进一个共享字典</h3>
+              <p>
+                暂停和决定发生在两次 HTTP
+                请求里，服务器要在两者之间记住这个暂停的审批。 响应里出现
+                <code>ToolApprovalRequestContent</code> 时就存在这里， 步骤 5 的
+                <code>/chat/approve</code> 按 id 读回。在 DI 中注册单例
+                <code>ConcurrentDictionary&lt;string, PendingApproval&gt;</code
+                >， <code>using System.Collections.Concurrent;</code> 从 A2
+                起就在。
+              </p>
+              <p>
+                把 <code>AddSingleton</code> 加在 DI 块里、已有的
+                <code>ConcurrentDictionary&lt;string, AgentSession&gt;</code>
+                注册之后。 <code>PendingApproval</code> 是文件作用域
+                record，放在 <code>app.Run();</code> 之后，与
+                <code>ChatRequest</code>、 <code>ApproveRequest</code> 等并列。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — DI 块（在 app.Build() 之前）</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddSingleton&lt;ConcurrentDictionary&lt;string, PendingApproval&gt;&gt;();</code></pre>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — app.Run() 之后的文件作用域</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>internal sealed record PendingApproval(
+    string SessionId,
+    AgentSession Session,
+    ToolApprovalRequestContent Request);</code></pre>
+              </div>
+              <p>
+                record 特意带上
+                <code>AgentSession</code>。审批决定必须继续同一对话。
+                这里丢掉会话，智能体就会没有历史、没有上下文地恢复，答案出错。
+                会话是 <a href="../lesson02/index.html">A2</a> 引入的 MAF
+                多轮记忆单元。
+              </p>
+            </li>
+
+            <li>
+              <h3>在 chat 响应构造器中检测暂停信号</h3>
+              <p>
+                这是暂停的读取端。每次
+                <code>agent.RunAsync</code> 后扫描响应里有没有
+                <code>ToolApprovalRequestContent</code
+                >。有就说明运行暂停，存下审批并让
+                调用方去问人；没有就是普通答案。调用方（前端）按
+                <code>kind</code> 分支：
+                <code>"approval"</code> 显示批准/拒绝提示，<code>"answer"</code>
+                照常显示回复。
+              </p>
+              <p>
+                <code>ToChatResponse</code> 和
+                <code>StoreApproval</code> 是文件作用域的
+                <code>static</code> 辅助方法，放在
+                <code>app.Run();</code> 之后、
+                <code>GetOrCreateSessionAsync</code>（A2 起就在）旁边。<code
+                  >/chat</code
+                >
+                和步骤 5 的 <code>/chat/approve</code> 都会调用它们。
+              </p>
+              <p>
+                第一个方法
+                <code>ToChatResponse</code>
+                把响应摊平成内容项，收集工具调用供展示， 再找第一个
+                <code>ToolApprovalRequestContent</code>。找到就调
+                <code>StoreApproval</code> 存下并拿到 id。返回对象据此把
+                <code>kind</code> 设为 <code>"approval"</code> 或
+                <code>"answer"</code>。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — app.Run() 之后的文件作用域</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>static object ToChatResponse(string sessionId, AgentSession session, AgentResponse response,
+    ConcurrentDictionary&lt;string, PendingApproval&gt; approvals)
+{
+    var contents = response.Messages.SelectMany(message =&gt; message.Contents).ToList();
+
+    var toolCalls = contents.OfType&lt;FunctionCallContent&gt;()
+        .Select(call =&gt; new { name = call.Name, arguments = (object?)call.Arguments })
+        .ToList();
+
+    var approvalRequest = contents.OfType&lt;ToolApprovalRequestContent&gt;()
+        .Select(approval =&gt;
+        {
+            var call = approval.ToolCall as FunctionCallContent;
+            return new
+            {
+                approvalId = StoreApproval(approvals, sessionId, session, approval),
+                toolName = call?.Name,
+                arguments = call?.Arguments,
+            };
+        })
+        .FirstOrDefault();
+
+    return new
+    {
+        sessionId,
+        kind = approvalRequest is null ? "answer" : "approval",
+        answer = response.Text,
+        menu = (object?)null,
+        toolCalls,
+        approvalRequest,
+    };
+}</code></pre>
+              </div>
+              <p>
+                第二个方法 <code>StoreApproval</code> 是写入端。生成新 id，把
+                <code>PendingApproval</code> 存进共享字典，返回
+                id。前端之后把这个 id 发给 <code>/chat/approve</code>。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — app.Run() 之后的文件作用域</span
+                  >
+                </div>
+                <pre class="code-block"><code>static string StoreApproval(
+    ConcurrentDictionary&lt;string, PendingApproval&gt; approvals,
+    string sessionId, AgentSession session, ToolApprovalRequestContent request)
+{
+    var approvalId = Guid.NewGuid().ToString("N");
+    approvals[approvalId] = new PendingApproval(sessionId, session, request);
+    return approvalId;
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>让 <code>/chat</code> 返回审批结构</h3>
+              <p>
+                <a href="../lesson02/index.html">A2</a> 的
+                <code>/chat</code> 只返回 <code>{ sessionId, answer }</code>。
+                运行因审批而暂停时，调用方拿不到 <code>approvalId</code>，
+                无法弹出审批提示。注入 <code>approvals</code> 字典并改为返回
+                <code>ToChatResponse</code>，暂停的运行就会以
+                <code>kind: "approval"</code> 带上已存的 id 返回。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — replace the /chat endpoint</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/chat", async (ChatRequest request, AIAgent agent,
+    ConcurrentDictionary&lt;string, AgentSession&gt; sessions,
+    ConcurrentDictionary&lt;string, PendingApproval&gt; approvals,
+    CancellationToken ct) =&gt;
+{
+    if (string.IsNullOrWhiteSpace(request.Message))
+        return Results.BadRequest(new { error = "message is required" });
+
+    var (sessionId, session) = await GetOrCreateSessionAsync(
+        request.SessionId, agent, sessions, ct);
+
+    var response = await agent.RunAsync(request.Message, session, cancellationToken: ct);
+
+    return Results.Ok(ToChatResponse(sessionId, session, response, approvals));
+});</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>添加 <code>POST /chat/approve</code> 端点（endpoint）</h3>
+              <p>
+                这是决定的写入端。它读回步骤 4 存的待审批项，用
+                <code>TryRemove</code> 移除条目（id 因此只能用一次），再用
+                <code>CreateResponse</code> 构造回复， 在同一会话上调
+                <code>RunAsync</code> 恢复运行。会话取自
+                <code>pending.Session</code>，所以对话历史保留。
+              </p>
+              <p>
+                把 <code>app.MapPost</code> 加在路由块里、已有
+                <code>/chat</code> 之后。 <code>ApproveRequest</code> record
+                是文件作用域，放在 <code>app.Run();</code> 之后、<code
+                  >ChatRequest</code
+                >
+                等旁边。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs — 路由块</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/chat/approve", async (ApproveRequest request, AIAgent agent,
+    ConcurrentDictionary&lt;string, PendingApproval&gt; approvals, CancellationToken ct) =&gt;
+{
+    if (string.IsNullOrWhiteSpace(request.ApprovalId)
+        || !approvals.TryRemove(request.ApprovalId, out var pending))
+        return Results.NotFound(new { error = "unknown or already-handled approvalId" });
+
+    var reply = new ChatMessage(ChatRole.User,
+        [pending.Request.CreateResponse(request.Approved, request.Reason ?? "")]);
+
+    var response = await agent.RunAsync(reply, pending.Session, cancellationToken: ct);
+    return Results.Ok(ToChatResponse(pending.SessionId, pending.Session, response, approvals));
+});</code></pre>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — app.Run() 之后的文件作用域</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>internal sealed record ApproveRequest(string ApprovalId, bool Approved, string? Reason);</code></pre>
+              </div>
+              <p>
+                <code>TryRemove</code> 让审批一次性。字典是审批登记表，id
+                一被移除就没了。 用同一个 id 再调会找不到，落进
+                <code>NotFound</code> 分支。
+              </p>
+            </li>
+
+            <li>
+              <h3>在流式端点中处理暂停信号（可选）</h3>
+              <p>
+                流式端点边到边发 token，所以要自己处理暂停。更新里出现
+                <code>ToolApprovalRequestContent</code>
+                时不停下来，而是存下审批并发出 <code>approval_request</code> SSE
+                事件，浏览器据此弹出批准/拒绝提示。 本步可选，只在你接通了
+                <a href="../lesson03/index.html">A3</a> /
+                <a href="../lesson09/index.html">C2</a> 的流式端点时才做。
+              </p>
+              <p>
+                把这两个新 <code>case</code> 加进 <code>/chat/stream</code> 的
+                <code>await foreach</code> 里那个已有 <code>switch</code>（A3
+                引入）。 同时把
+                <code
+                  >ConcurrentDictionary&lt;string, PendingApproval&gt;
+                  approvals</code
+                >
+                加进处理器参数列表以注入单例。处理器签名如下，随后是完整循环体。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — /chat/stream 处理器签名（加上 approvals
+                    参数）</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/chat/stream", async (HttpContext context, AIAgent agent,
+    ConcurrentDictionary&lt;string, AgentSession&gt; sessions,
+    ConcurrentDictionary&lt;string, PendingApproval&gt; approvals, CancellationToken ct) =&gt;</code></pre>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — /chat/stream 的 await foreach（替换已有的
+                    循环体）</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>await foreach (var update in agent.RunStreamingAsync(request.Message, session, cancellationToken: ct))
+{
+    foreach (var content in update.Contents)
+    {
+        switch (content)
+        {
+            case FunctionCallContent call:
+                await SseEvent.WriteAsync(context.Response, "tool_call",
+                    new { name = call.Name, arguments = call.Arguments }, ct);
+                break;
+            case ToolApprovalRequestContent approval:
+                var approvalId = StoreApproval(approvals, sessionId, session, approval);
+                var approvalCall = approval.ToolCall as FunctionCallContent;
+                await SseEvent.WriteAsync(context.Response, "approval_request",
+                    new { approvalId, toolName = approvalCall?.Name, arguments = approvalCall?.Arguments }, ct);
+                break;
+        }
+    }
+
+    if (!string.IsNullOrEmpty(update.Text))
+        await SseEvent.WriteAsync(context.Response, "token", new { text = update.Text }, ct);
+}</code></pre>
+              </div>
+            </li>
+          </ol>
+
+          <h2>这套双端点（endpoint）流程端到端是怎么跑的</h2>
+          <p>整个交互就两次 HTTP 调用。</p>
+          <ol>
+            <li>
+              <strong>第一次</strong> ——
+              <code>POST /chat</code>，问题需要无界限扫描。 模型选中
+              <code>RunUnboundedSql</code>，框架见到
+              <code>ApprovalRequiredAIFunction</code> 包装器就暂停，发出
+              <code>ToolApprovalRequestContent</code>。服务器存下它，返回
+              <code
+                >{ kind: "approval", approvalRequest: { approvalId: "...",
+                toolName: "RunUnboundedSql", arguments: {...} } }</code
+              >。运行挂起，还没跑任何 SQL。
+            </li>
+            <li>
+              <strong>第二次</strong> —— <code>POST /chat/approve</code>，带
+              <code>approvalId</code> 和 <code>approved: true/false</code>。
+              端点移除条目（id 用掉），调
+              <code>CreateResponse</code>，在同一会话上恢复
+              <code>RunAsync</code
+              >。批准则执行工具并作答；拒绝则灌入拒绝消息、不执行就作答。
+            </li>
+          </ol>
+
+          <div class="callout callout--build">
+            <span class="callout-label">🔧 说明</span>
+            <p>
+              审批登记表在进程内存里。服务器重启后待审批项消失，客户端拿到 404。
+              生产环境要把审批队列存到后端（数据库、Redis）。本课用内存即可；
+              跨重启的持久性是
+              <a href="../lesson17/index.html">F2</a>
+              的生产检查点（checkpoint）主题。
+            </p>
+          </div>
+
+          <h2>验证</h2>
+          <div class="gate">
+            <p class="gate-title">✅ 关卡 — 未变绿前不要前进</p>
+
+            <p><strong>第 1 步 —— 触发审批请求。</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:5200/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Across the entire otel_logs history with no time filter at all, what is the timestamp of the very first event ever recorded?"}' \
+  | jq '{kind, approvalRequest}'</code></pre>
+            </div>
+            <p>预期输出 —— 运行暂停，尚未执行任何 SQL：</p>
+            <div class="codewrap">
+              <pre class="code-block"><code>{
+  "kind": "approval",
+  "approvalRequest": {
+    "approvalId": "&lt;some-id&gt;",
+    "toolName": "RunUnboundedSql",
+    "arguments": { "query": "SELECT ..." }
+  }
+}</code></pre>
+            </div>
+
+            <p><strong>第 2 步 —— 批准并验证已执行。</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:5200/chat/approve \
+  -H "Content-Type: application/json" \
+  -d '{"approvalId": "&lt;some-id&gt;", "approved": true}' \
+  | jq '{kind, answer}'</code></pre>
+            </div>
+            <p>
+              预期：<code>kind: "answer"</code>，并附带一段实质性的回复， 给出
+              <code>otel_logs</code> 中最早事件的时间戳。
+            </p>
+
+            <p><strong>第 3 步 —— 拒绝路径。</strong></p>
+            <p>发起一个新的 <code>/chat</code> 问题来触发 审批，然后拒绝它：</p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:5200/chat/approve \
+  -H "Content-Type: application/json" \
+  -d '{"approvalId": "&lt;new-id&gt;", "approved": false, "reason": "too expensive"}' \
+  | jq '{kind, answer}'</code></pre>
+            </div>
+            <p>
+              预期：<code>kind: "answer"</code>，且回复文本
+              优雅地确认了这次拒绝（例如“我没能运行 这次全表扫描 ——
+              该请求被拒绝了”）。智能体不会崩溃 或返回一个空回复。
+            </p>
+
+            <p>
+              <strong>反向测试 —— 第二次使用已消费的 id 返回 404。</strong>
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:5200/chat/approve \
+  -H "Content-Type: application/json" \
+  -d '{"approvalId": "&lt;the-id-you-already-used&gt;", "approved": true}' \
+  | jq .error</code></pre>
+            </div>
+            <p>
+              预期：
+              <code>"unknown or already-handled approvalId"</code>，HTTP 状态
+              404。这确认了审批是一次性的。
+            </p>
+
+            <p><strong>反向测试 —— 伪造的 id 同样返回 404。</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:5200/chat/approve \
+  -H "Content-Type: application/json" \
+  -d '{"approvalId": "doesnotexist", "approved": true}' \
+  | jq .error</code></pre>
+            </div>
+            <p>预期：相同的 404 错误体。</p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ 常见坑</span>
+            <ul>
+              <li>
+                <strong>审批存了却没带上它的会话（session）</strong> →
+                智能体恢复时 没有对话历史，答案没根据或出错。永远把
+                <code>AgentSession</code>
+                存进待审批 record。
+              </li>
+              <li>
+                <strong
+                  ><code>kind: "answer"</code>
+                  但答案为空或“我无法”，即使已批准</strong
+                >
+                → 审批被重放到了错误的会话（新会话）。确认会话取自
+                <code>pending.Session</code>，而不是落实时从
+                <code>GetOrCreateSessionAsync</code> 取。
+              </li>
+              <li>
+                <strong>第二次使用某个审批 id 没有返回 404</strong>
+                → 你在 approve 端点用普通字典赋值（<code
+                  >approvals[id] = ...</code
+                >） 存审批，而不是用
+                <code>TryRemove</code> 移除。审批存活，可被重用。
+              </li>
+              <li>
+                <strong>加了包装器后正常工具调用失效</strong>
+                → 你把不该关卡的工具也包了。只有
+                <code>RunUnboundedSql</code> 该包装， 其他工具都用普通
+                <code>AIFunctionFactory.Create</code>。
+              </li>
+              <li>
+                <strong>智能体从不选 <code>RunUnboundedSql</code></strong>
+                → 工具名和描述没把它和
+                <code>RunSql</code> 区分开，模型偏爱更简单的工具。
+                让描述写明“WITHOUT the time-filter requirement”和“full-table
+                scan”。
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              标记本课完成
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

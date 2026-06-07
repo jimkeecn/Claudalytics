@@ -1,0 +1,812 @@
+<!doctype html>
+<!-- lesson06/index.html — B3 · An agent is just a node -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>B3 · An agent is just a node — MAF Curriculum</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="06">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">Curriculum</a> / Module B / B3
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">Lesson 06 · B3 · Module B — The graph</p>
+            <h1>An agent is just a node</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★</span>
+              <span class="badge badge--cost">Haiku</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>What you'll learn</h2>
+          <p>
+            Right now the Claudalytics Copilot investigation ends by dumping raw
+            probe rows. A person asks "what does this mean?" and the pipeline
+            has no answer, because nothing turns the numbers into words. This
+            lesson drops an LLM agent into the graph as one node. The node reads
+            the typed probe data and writes a short report, so the run finishes
+            with prose a person can read.
+          </p>
+          <p>
+            The mental model is simple.
+            <strong>An agent is just a node.</strong> You extend
+            <code>Executor&lt;T&gt;</code>, receive a typed input, call
+            <code>agent.RunAsync</code>, and yield the result. The graph shape
+            and the event stream from
+            <a href="../lesson05/index.html">B2</a> stay the same. Only the last
+            node gets smarter.
+          </p>
+          <p>
+            To get there you add three message records (<code>Findings</code>,
+            <code>DeepDiveRequest</code>, <code>DeepDiveDecision</code>), a
+            <code>ValidatorExecutor</code> that does the fan-in, and a
+            <code>SynthesisExecutor</code> that holds the agent. You also create
+            <code>InvestigationWorkflow.cs</code> as the real home of the
+            graph's <code>Build</code> method, which retires the B1 scaffolding
+            files <code>ProbeWorkflow.cs</code> and
+            <code>CollectorExecutor</code>.
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 Teach</span>
+            <p>
+              MAF's <strong>intelligence spectrum</strong>: every workflow node
+              sits between "pure deterministic code" (free, instant) and "full
+              LLM agent" (flexible, expensive). You choose how much intelligence
+              each step deserves. The SQL probes need none; the synthesis step
+              needs exactly enough to turn tabular numbers into coherent prose.
+            </p>
+            <p>API surfaces introduced in this lesson:</p>
+            <ul>
+              <li>
+                <code>Executor&lt;TInput&gt;</code> — unchanged base class;
+                inject the agent via the constructor (DI works exactly as in any
+                service).
+              </li>
+              <li>
+                <code>[YieldsOutput(typeof(T))]</code> — terminal-node
+                declaration; the framework rejects undeclared yield types at
+                runtime, so this attribute is mandatory.
+              </li>
+              <li>
+                <code>context.YieldOutputAsync(value, ct)</code> — pushes the
+                final value to the workflow output stream and ends the run.
+              </li>
+              <li>
+                <code>agent.RunAsync(prompt, ct)</code> — single-turn LLM call
+                returning <code>.Text</code>. Use a dedicated
+                <em>writer agent</em> here, not the main analyst; it must never
+                ask a follow-up question (see the prompt contract below).
+              </li>
+            </ul>
+            <p>
+              <strong>The prompt contract for agent-in-workflow</strong>: the
+              model's first response is the workflow's output. There is no
+              channel for a follow-up question to get answered. System
+              instructions must include:
+              <em
+                >"Your response is the final product. Do not ask questions or
+                request more data."</em
+              >
+            </p>
+          </div>
+
+          <h2>Pipeline shape after this lesson</h2>
+          <div class="codewrap">
+            <pre class="code-block"><code>PlanExecutor
+    │  (3× ProbeJob)
+    ▼  fan-out
+ProbeExecutor × 3
+    │  (3× ProbeResult)
+    ▼  fan-in barrier
+ValidatorExecutor        ← NEW: deterministic; builds Findings; routes spike branch
+    │  (Findings)             (DeepDiveRequest goes to deepDive directly — no human gate in B3)
+    ▼
+SynthesisExecutor        ← NEW: holds AIAgent → markdown report
+    │  [YieldsOutput]
+    ▼  workflow output: string</code></pre>
+          </div>
+
+          <h2>Build it</h2>
+          <ol class="steps">
+            <li>
+              <h3>
+                Define the new message records in
+                <code>InvestigationModels.cs</code>
+              </h3>
+              <p>
+                The graph needs typed messages to pass between nodes.
+                <code>Findings</code> is the record the validator builds and the
+                synthesis node reads. <code>DeepDiveRequest</code> and
+                <code>DeepDiveDecision</code> belong to the cost-spike branch,
+                which the validator and the deep-dive stub reference but do not
+                fully use yet. Append these three records to
+                <code>Workflows/InvestigationModels.cs</code> (the file from
+                <a href="../lesson04/index.html">B1</a> that already holds
+                <code>InvestigationRequest</code>, <code>ProbeJob</code>, and
+                <code>ProbeResult</code>). No new usings are needed.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationModels.cs — append after the
+                    ProbeResult record</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>/// &lt;summary&gt;Aggregated, validated probe results.&lt;/summary&gt;
+public sealed record Findings(int Days, List&lt;ProbeResult&gt; Results, bool CostSpike, List&lt;string&gt; ValidationNotes);
+
+/// &lt;summary&gt;Deep-dive branch request, sent by the validator on a cost spike.&lt;/summary&gt;
+public sealed record DeepDiveRequest(string Reason);
+
+/// &lt;summary&gt;Deep-dive branch decision, returned by the approval port in F2.&lt;/summary&gt;
+public sealed record DeepDiveDecision(bool Approve);
+</code></pre>
+              </div>
+              <p>
+                <code>DeepDiveRequest</code> and
+                <code>DeepDiveDecision</code> are introduced here because the
+                validator's <code>[SendsMessage]</code> attributes and the
+                <code>DeepDiveExecutor</code> stub (Step 3) reference them. The
+                human-approval PORT that routes the request to a human and waits
+                for the decision is added in
+                <a href="../lesson17/index.html">F2</a>.
+              </p>
+            </li>
+
+            <li>
+              <h3>Add the writer agent's system instructions</h3>
+              <p>
+                The synthesis node needs an agent to call. That agent is a
+                writer, not the main analyst. It has one job. It receives
+                structured data and returns markdown prose. Add a
+                <code>Writer</code> constant inside the existing
+                <code>Instructions</code> class in
+                <code>Agents/Instructions.cs</code>, after the
+                <code>System</code> constant. The <code>System</code> and
+                <code>SchemaDoc</code> constants were added in
+                <a href="../lesson01/index.html">A1</a>, so the usings and
+                namespace are already there.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Agents/Instructions.cs — inside the Instructions
+                    class</span
+                  >
+                </div>
+                <pre class="code-block"><code>public const string Writer = """
+    You are a technical writer for an observability report.
+    You receive structured probe data (TSV) and validation notes.
+    Write a short markdown investigation report: headline numbers,
+    then findings, then 1-3 recommendations.
+    Use ONLY the numbers present in the data — do not invent figures.
+    If data is thin, say so honestly.
+    Your response is the final product. Do not ask questions or request more data.
+    """;
+</code></pre>
+              </div>
+              <p>
+                The last sentence is the prompt contract. The model's first
+                reply is the workflow's output. There is no channel for a
+                follow-up question to get an answer, so the agent must never ask
+                one.
+              </p>
+            </li>
+
+            <li>
+              <h3>
+                Add <code>ValidatorExecutor</code>,
+                <code>DeepDiveExecutor</code> stub, and
+                <code>SynthesisExecutor</code> to
+                <code>InvestigationExecutors.cs</code>
+              </h3>
+              <p>
+                Append all three executors to
+                <code>Workflows/InvestigationExecutors.cs</code>. The usings at
+                the top of that file already include
+                <code>using Microsoft.Agents.AI;</code> and
+                <code>using Microsoft.Agents.AI.Workflows;</code> from
+                <a href="../lesson04/index.html">B1</a>. Order matters for
+                teaching: Validator first (fan-in logic), then DeepDive stub
+                (spike branch placeholder), then Synthesis (the LLM node).
+              </p>
+
+              <h4>ValidatorExecutor — deterministic fan-in</h4>
+              <p>
+                The validator sits behind the fan-in barrier. It collects all
+                three <code>ProbeResult</code> messages, checks each one, and
+                builds the <code>Findings</code> record that the synthesis node
+                reads next. It collects the results in an instance field. In
+                this B3 form the cost-spike check is not built yet, so
+                <code>CostSpike</code> is always <code>false</code> and
+                <code>Days</code> is a placeholder zero. B4 (L07) wires the real
+                values through context state and adds spike detection. The
+                <code>⚠</code> marker on the field flags a bug that
+                <a href="../lesson07/index.html">B4</a> explains. The field does
+                not survive checkpoint and resume.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs — append</span
+                  >
+                </div>
+                <pre class="code-block"><code>[SendsMessage(typeof(Findings))]
+[SendsMessage(typeof(DeepDiveRequest))]
+public sealed class ValidatorExecutor() : Executor&lt;ProbeResult&gt;("validator")
+{
+    private const int ExpectedProbes = 3;
+    private readonly List&lt;ProbeResult&gt; _accumulated = []; // ⚠ B4 shows why this field breaks on resume
+
+    public override async ValueTask HandleAsync(
+        ProbeResult result, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        _accumulated.Add(result);
+        if (_accumulated.Count &lt; ExpectedProbes) return;
+
+        var notes = _accumulated
+            .Where(probe =&gt; !probe.HasData)
+            .Select(probe =&gt; $"Probe '{probe.Name}' returned no usable numbers — finding rejected, not interpreted.")
+            .ToList();
+
+        var findings = new Findings(
+            Days: 0,
+            Results: [.._accumulated],
+            CostSpike: false,
+            ValidationNotes: notes);
+
+        await context.AddEventAsync(
+            new InvestigationProgressEvent("Validation complete — forwarding findings."), cancellationToken);
+
+        await context.SendMessageAsync(findings, cancellationToken: cancellationToken);
+    }
+}
+</code></pre>
+              </div>
+              <p>
+                <code>[SendsMessage(typeof(DeepDiveRequest))]</code> is declared
+                even though this B3 form never sends it. The builder validates
+                all edges at <code>Build()</code> time — declaring the type now
+                means the deep-dive edge added in Step 4 is accepted without
+                error. The validator will actually send
+                <code>DeepDiveRequest</code> only after B4 adds spike detection.
+              </p>
+
+              <h4>DeepDiveExecutor — stub for the spike branch</h4>
+              <p>
+                Step 4 wires the deep-dive executor into the graph. The builder
+                checks every declared edge at <code>Build()</code> time, so this
+                stub must exist for the validator's
+                <code>[SendsMessage(typeof(DeepDiveRequest))]</code> edge to be
+                accepted. In B3 the body is a stub. It reads the findings from
+                shared state, falls back to an empty record if the state is
+                missing, and forwards the findings to the synthesis node. The
+                full expensive-query body is added in
+                <a href="../lesson17/index.html">F2</a>.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs — append</span
+                  >
+                </div>
+                <pre class="code-block"><code>[SendsMessage(typeof(Findings))]
+public sealed class DeepDiveExecutor() : Executor&lt;DeepDiveDecision&gt;("deepdive")
+{
+    public override async ValueTask HandleAsync(
+        DeepDiveDecision decision, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        var findings = await context.ReadStateAsync&lt;Findings&gt;(
+            "findings", scopeName: "investigation", cancellationToken)
+            ?? new Findings(0, [], false, ["Findings state was missing."]);
+
+        await context.AddEventAsync(
+            new InvestigationProgressEvent("Deep-dive stub — forwarding findings."), cancellationToken);
+
+        await context.SendMessageAsync(findings, cancellationToken: cancellationToken);
+    }
+}
+</code></pre>
+              </div>
+
+              <h4>SynthesisExecutor — the agent node</h4>
+              <p>
+                The synthesis executor is the only LLM node in the graph. It
+                reads the <code>Findings</code> the validator sent. Its shape is
+                the same as every other executor. It extends
+                <code>Executor&lt;T&gt;</code> and implements
+                <code>HandleAsync</code>. The difference is the body. It calls
+                <code>writer.RunAsync</code> instead of running plain code.
+              </p>
+              <p>
+                The first part of the body turns the typed
+                <code>Findings</code> into plain text the agent can read. It
+                joins each probe's rows into one block and joins the validation
+                notes into another.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs — append</span
+                  >
+                </div>
+                <pre class="code-block"><code>[YieldsOutput(typeof(string))]
+public sealed class SynthesisExecutor(AIAgent writer) : Executor&lt;Findings&gt;("synthesis")
+{
+    public override async ValueTask HandleAsync(
+        Findings findings, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        await context.AddEventAsync(
+            new InvestigationProgressEvent("Synthesizing the report."), cancellationToken);
+
+        var probesText = string.Join("\n\n",
+            findings.Results.Select(probe =&gt; $"## {probe.Name}\n{probe.Rows}"));
+        var notesText = findings.ValidationNotes.Count == 0
+            ? "(none)"
+            : string.Join("\n", findings.ValidationNotes);
+</code></pre>
+              </div>
+              <p>
+                The second part calls the writer agent with one prompt. The
+                prompt carries the probe text, the notes, and the day count. The
+                agent returns markdown, and
+                <code>YieldOutputAsync</code> pushes that text out as the
+                workflow's final output. Close the method and class after this
+                block.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs — same method</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>        var response = await writer.RunAsync($"""
+            Write a short markdown investigation report over the last {findings.Days} days of
+            Claude Code telemetry. Cost spike detected: {findings.CostSpike}.
+
+            Probe data (TSV):
+            {probesText}
+
+            Validator notes (mention them honestly):
+            {notesText}
+
+            Shape: headline numbers, findings, then 1-3 recommendations. Use only the
+            numbers in the data above.
+            """, cancellationToken: cancellationToken);
+
+        await context.YieldOutputAsync(response.Text, cancellationToken);
+    }
+}
+</code></pre>
+              </div>
+              <p>
+                <code>[YieldsOutput(typeof(string))]</code> is required. Without
+                it the framework throws a runtime error that names the executor
+                and the undeclared type.
+              </p>
+            </li>
+
+            <li>
+              <h3>
+                Construct the writer agent inline in
+                <code>InvestigationWorkflow.Build()</code>
+              </h3>
+              <p>
+                The synthesis node needs the writer agent passed to it. Do
+                <strong>not</strong> register the writer in DI. Registering it
+                as <code>AddSingleton&lt;AIAgent&gt;</code> would collide with
+                the main analyst, which is already registered under the same
+                type. DI would then inject whichever one was registered last.
+                Instead, build the writer inline inside
+                <code>InvestigationWorkflow.Build()</code>, which is the pattern
+                the app uses. No new NuGet packages are needed. All dependencies
+                were added in <a href="../lesson01/index.html">A1</a>. Place
+                this after the code resolves <code>apiKey</code> and creates
+                <code>client</code>.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationWorkflow.cs — inside Build()</span
+                  >
+                </div>
+                <pre class="code-block"><code>var writer = client.AsAIAgent(
+    model: ModelTiers.Analyst(config),
+    instructions: Instructions.Writer,
+    name: "InvestigationWriter");
+</code></pre>
+              </div>
+              <p>
+                <code>client.AsAIAgent(model:, instructions:, name:)</code> is
+                the three-param overload. Passing
+                <code>instructions:</code> sets the system prompt without a
+                <code>ChatClientAgentOptions</code> wrapper object — you use
+                exactly this form.
+              </p>
+            </li>
+
+            <li>
+              <h3>
+                Create <code>Workflows/InvestigationWorkflow.cs</code> with the
+                full B3 graph
+              </h3>
+              <p>
+                This file is the real home of the
+                <code>InvestigationWorkflow.Build</code> method. Create it as a
+                new file. It replaces the B1 scaffolding
+                <code>ProbeWorkflow.cs</code>. The first part builds the file
+                header, the writer agent, and one instance of each node. These
+                nodes are the same ones you wrote in the earlier steps.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationWorkflow.cs</span
+                  >
+                  <span class="tag tag--new">new file</span>
+                </div>
+                <pre class="code-block"><code>using AiAgent.Agents;
+using AiAgent.Tools;
+using Anthropic;
+using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Workflows;
+
+namespace AiAgent.Workflows;
+
+/// &lt;summary&gt;The investigation graph (B3 form). No human-approval port yet; that is added in F2.&lt;/summary&gt;
+public static class InvestigationWorkflow
+{
+    public static Workflow Build(IConfiguration config, ClickHouseClient clickHouse)
+    {
+        var apiKey = config["ANTHROPIC_API_KEY"]
+            ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not set.");
+
+        IAnthropicClient client = new AnthropicClient { ApiKey = apiKey };
+        var writer = client.AsAIAgent(
+            model: ModelTiers.Analyst(config),
+            instructions: Instructions.Writer,
+            name: "InvestigationWriter");
+
+        var plan = new PlanExecutor();
+        ProbeExecutor[] probes =
+        [
+            new("probe-0", clickHouse),
+            new("probe-1", clickHouse),
+            new("probe-2", clickHouse),
+        ];
+        var validator = new ValidatorExecutor();
+        var deepDive = new DeepDiveExecutor();
+        var synthesis = new SynthesisExecutor(writer);
+
+        var builder = new WorkflowBuilder(plan);
+</code></pre>
+              </div>
+              <p>
+                The second part wires the edges. The fan-out edge routes each
+                <code>ProbeJob</code> from the plan to one probe. The fan-in
+                barrier holds the validator until all three probes have
+                delivered. The normal path sends <code>Findings</code> from the
+                validator to the synthesis node. The last two edges are the
+                spike branch. The validator sends
+                <code>DeepDiveRequest</code> to the deep-dive stub, and the stub
+                sends the findings on to synthesis. Both spike edges must be
+                declared now, even though B3 never fires them, so the builder
+                accepts the validator's
+                <code>[SendsMessage(typeof(DeepDiveRequest))]</code> at
+                <code>Build()</code> time. There is no human gate on this branch
+                yet. The approval port that pauses the run for a person is added
+                in <a href="../lesson17/index.html">F2</a>.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationWorkflow.cs — same method</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>        builder.AddFanOutEdge&lt;ProbeJob&gt;(plan, probes.Select(p =&gt; (ExecutorBinding)p),
+            (job, targetCount) =&gt; [(job?.Slot ?? 0) % targetCount]);
+
+        builder.AddFanInBarrierEdge(probes.Select(p =&gt; (ExecutorBinding)p), validator);
+
+        builder.AddEdge&lt;Findings&gt;(validator, synthesis, _ =&gt; true);
+
+        builder.AddEdge&lt;DeepDiveRequest&gt;(validator, deepDive, _ =&gt; true);
+        builder.AddEdge(deepDive, synthesis);
+
+        return builder.WithOutputFrom(synthesis).Build();
+    }
+}
+</code></pre>
+              </div>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 Clean up B1 scaffolding</span>
+                <p>
+                  Now that <code>InvestigationWorkflow.cs</code> owns the graph,
+                  two B1 artefacts are superseded:
+                </p>
+                <ul>
+                  <li>
+                    <strong
+                      >Delete <code>Workflows/ProbeWorkflow.cs</code></strong
+                    >
+                    — the throwaway B1 wrapper class. It is replaced by
+                    <code>InvestigationWorkflow.cs</code>.
+                  </li>
+                  <li>
+                    <strong
+                      >Delete <code>CollectorExecutor</code> from
+                      <code>Workflows/InvestigationExecutors.cs</code></strong
+                    >
+                    — the naive concatenating executor from B1, now superseded
+                    by <code>ValidatorExecutor</code> +
+                    <code>SynthesisExecutor</code>. The v1 vs v2 section below
+                    shows exactly what it contained.
+                  </li>
+                </ul>
+              </div>
+            </li>
+
+            <li>
+              <h3>Repoint the service factory in <code>Program.cs</code></h3>
+              <p>
+                The <code>InvestigationService</code> registered in
+                <a href="../lesson05/index.html">B2</a> uses a factory that
+                still builds the old <code>ProbeWorkflow</code>. Point it at the
+                new graph. This is a one-line change.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs</span>
+                </div>
+                <pre class="code-block"><code>// Before (B2 — ProbeWorkflow):
+builder.Services.AddSingleton(sp =&gt;
+    new InvestigationService(() =&gt; ProbeWorkflow.Build(sp.GetRequiredService&lt;ClickHouseClient&gt;()), sp.GetRequiredService&lt;ILogger&lt;InvestigationService&gt;&gt;()));
+
+// After (B3 — InvestigationWorkflow):
+builder.Services.AddSingleton(sp =&gt;
+    new InvestigationService(() =&gt; InvestigationWorkflow.Build(sp.GetRequiredService&lt;IConfiguration&gt;(), sp.GetRequiredService&lt;ClickHouseClient&gt;()), sp.GetRequiredService&lt;ILogger&lt;InvestigationService&gt;&gt;()));
+</code></pre>
+              </div>
+              <p>
+                The factory now also resolves <code>config</code> from the
+                provider. <code>Build</code> needs it to read
+                <code>ANTHROPIC_API_KEY</code> and <code>ModelTiers</code>. The
+                workflow it returns now fans through a real validator and a
+                synthesis node, not the naive collector.
+              </p>
+            </li>
+          </ol>
+
+          <div class="callout callout--evolution">
+            <span class="callout-label">🔄 Evolution arc</span>
+            <p>
+              This lesson completes <strong>Arc 1</strong>, from the B1
+              collector to the B3 synthesis node. The naive collector joined raw
+              TSV and returned it. That was enough to prove the fan-in worked.
+              It breaks the moment a person asks "what does this mean?" The
+              pipeline cannot answer. The synthesis node is the fix. The v1 vs
+              v2 tabs below show what changed.
+            </p>
+          </div>
+
+          <h2>v1 vs v2</h2>
+
+          <div class="tabs">
+            <div class="tab-bar">
+              <button class="tab-btn active">v1 — naive collector (B1)</button>
+              <button class="tab-btn">v2 — synthesis node (B3)</button>
+            </div>
+
+            <div class="tab-panel active">
+              <p>
+                The v1 collector is shown only to expose the problem — you would
+                not ship it. The end state:
+              </p>
+              <div class="codewrap">
+                <pre
+                  class="code-block"
+                ><code>// v1 — naive concatenating collector — do not ship
+[YieldsOutput(typeof(string))]
+public sealed class CollectorExecutor() : Executor&lt;ProbeResult&gt;("collector")
+{
+    private readonly List&lt;string&gt; _accumulated = [];  // ⚠ breaks on checkpoint/resume (B4)
+
+    public override async ValueTask HandleAsync(
+        ProbeResult result, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        _accumulated.Add($"## {result.Name}\n{result.Rows}");
+        if (_accumulated.Count &lt; 3) return;
+
+        // Concatenate and emit — no intelligence.
+        await context.YieldOutputAsync(string.Join("\n\n", _accumulated), cancellationToken);
+    }
+}
+</code></pre>
+              </div>
+              <p>
+                <strong>Why it breaks:</strong> Output is raw TSV — no
+                interpretation, no recommendations, not usable by a human. The
+                instance field <code>_accumulated</code> also breaks on
+                checkpoint/resume (the subject of
+                <a href="../lesson07/index.html">B4</a>).
+              </p>
+            </div>
+
+            <div class="tab-panel">
+              <p>
+                The v2 synthesis node receives an assembled
+                <code>Findings</code> record from
+                <code>ValidatorExecutor</code> — one message, one LLM call, one
+                yield. No instance field; accumulation is done checkpoint-safely
+                in the validator via <code>context.ReadOrInitStateAsync</code>
+                (added in B4).
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs</span
+                  >
+                </div>
+                <pre class="code-block"><code>[YieldsOutput(typeof(string))]
+public sealed class SynthesisExecutor(AIAgent writer) : Executor&lt;Findings&gt;("synthesis")
+{
+    public override async ValueTask HandleAsync(
+        Findings findings, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        var probesText = string.Join("\n\n",
+            findings.Results.Select(probe =&gt; $"## {probe.Name}\n{probe.Rows}"));
+
+        var response = await writer.RunAsync($"""
+            Write a short markdown investigation report over the last {findings.Days} days ...
+            Probe data (TSV): {probesText}
+            Use only the numbers in the data above.
+            """, cancellationToken: cancellationToken);
+
+        await context.YieldOutputAsync(response.Text, cancellationToken);
+    }
+}
+</code></pre>
+              </div>
+            </div>
+          </div>
+
+          <h2>Verify</h2>
+          <div class="gate">
+            <p class="gate-title">✅ Gate — do not advance until green</p>
+
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>dotnet run -- --environment Testing</code></pre>
+            </div>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/investigate \
+  -H "Content-Type: application/json" \
+  -d '{"days": 7}'</code></pre>
+            </div>
+
+            <p><strong>All three must be true:</strong></p>
+            <ol>
+              <li>
+                Response body is <strong>prose markdown</strong> — headers,
+                sentences, numbers. Not a raw TSV dump.
+              </li>
+              <li>
+                Numbers in the report match the probe data exactly. If
+                <code>cost-trend</code> shows <code>0.12</code> as the
+                highest-cost day, the report must say <code>0.12</code> — not a
+                hallucinated figure.
+              </li>
+              <li>
+                The event timeline from the B2 driver shows the same graph
+                shape: probe executors in one superstep, validator next,
+                synthesis last. Adding an agent node does not change topology.
+              </li>
+            </ol>
+
+            <p>
+              <strong>Negative test:</strong> Remove the probe data from the
+              synthesis prompt (pass an empty <code>probesText</code>) and
+              rerun. The model will produce a plausible-sounding report with
+              invented numbers — it still completes successfully. This is the
+              hallucination baseline. If your grounded and ungrounded reports
+              look identical, the prompt is not constraining the model to the
+              data — tighten the instructions. Put the probe data back before
+              advancing.
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ Pitfalls</span>
+            <ul>
+              <li>
+                <strong>Workflow output is a question, not a report</strong> →
+                Writer agent instructions are missing the prompt contract
+                sentence. Add:
+                <em
+                  >"Your response is the final product. Do not ask questions or
+                  request more data."</em
+                >
+              </li>
+              <li>
+                <strong
+                  >Runtime error naming <code>SynthesisExecutor</code> and
+                  <code>string</code></strong
+                >
+                → <code>[YieldsOutput(typeof(string))]</code> attribute is
+                missing from the class.
+              </li>
+              <li>
+                <strong>Report numbers don't match the probes</strong> →
+                <code>findings.Results</code> is empty when synthesis runs. The
+                validator is not populating the <code>Findings</code> record —
+                add a debug event in <code>ValidatorExecutor</code> logging the
+                result count.
+              </li>
+              <li>
+                <strong
+                  >Wrong agent injected into
+                  <code>SynthesisExecutor</code></strong
+                >
+                → You registered the writer as
+                <code>AddSingleton&lt;AIAgent&gt;</code> in
+                <code>Program.cs</code>. DI resolves the last registered
+                <code>AIAgent</code> and <code>SynthesisExecutor</code> gets
+                whichever wins the registration order race. Fix: construct the
+                writer inline in <code>InvestigationWorkflow.Build()</code> (as
+                shown in Step 4) and pass it directly to
+                <code>new SynthesisExecutor(writer)</code> — no DI lookup at
+                all.
+              </li>
+              <li>
+                <strong
+                  >Build error: undeclared edge type
+                  <code>DeepDiveRequest</code></strong
+                >
+                → <code>ValidatorExecutor</code> is missing
+                <code>[SendsMessage(typeof(DeepDiveRequest))]</code>, or the
+                <code>AddEdge&lt;DeepDiveRequest&gt;(validator, deepDive)</code>
+                call in <code>InvestigationWorkflow.Build()</code> is absent.
+                Both must be present even though the spike branch is never
+                triggered in B3.
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              Mark lesson complete
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

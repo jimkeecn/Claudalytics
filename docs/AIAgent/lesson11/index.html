@@ -1,0 +1,753 @@
+<!doctype html>
+<!-- lesson11/index.html — D1 · Weekly report: hand-built graph → builder sugar -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>
+      D1 · Weekly report: hand-built graph → builder sugar — MAF Curriculum
+    </title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="11">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">Curriculum</a> / Module D / D1
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">
+              Lesson 11 · D1 · Module D — Composition &amp; orchestration
+            </p>
+            <h1>Weekly report: hand-built graph → builder sugar</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★</span>
+              <span class="badge badge--cost">Haiku</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>What you'll learn</h2>
+          <p>
+            The weekly report needs three analysts to run at the same time, then
+            one writer to combine their findings. The prebuilt builders
+            <code>AgentWorkflowBuilder.BuildConcurrent</code> and
+            <code>BuildSequential</code> do this in a few lines. But when they
+            go wrong — the three analysts run one after another instead of in
+            parallel, the wrong message comes back, or the trace shows no
+            concurrency — you cannot fix them if they look like magic. So you
+            build the report by hand first and see the exact graph the builders
+            produce. Then you rewrite it with the builders, knowing they are
+            just syntactic sugar over a fan-out, a fan-in barrier, and a
+            sequential edge.
+          </p>
+          <p>
+            You build the report twice. In v1 you wire the fan-out, barrier, and
+            summarizer node <em>by hand</em> using the raw
+            <code>WorkflowBuilder</code> skills from
+            <a href="../lesson04/index.html">B1</a>–<a
+              href="../lesson06/index.html"
+              >B3</a
+            >. Then in v2 you rewrite it with the prebuilt builders and see they
+            emit <strong>the same graph you just wrote by hand</strong>. The
+            hand-built v1 is shown only to reveal the graph the builders
+            generate; you keep v2. Its job was to show you the graph underneath,
+            so you can debug any orchestration shape later.
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 Teach</span>
+            <p>
+              <strong>Three new API surfaces in Module D:</strong>
+            </p>
+            <ul>
+              <li>
+                <code>AgentWorkflowBuilder.BuildConcurrent(agents)</code> — fans
+                all listed agents out in parallel as a single workflow
+                superstep; the aggregated outputs flow to the next stage.
+                Equivalent to a fan-out edge plus a fan-in barrier in the raw
+                builder.
+              </li>
+              <li>
+                <code>AgentWorkflowBuilder.BuildSequential(agents)</code> —
+                chains agents one after the next, each receiving the previous
+                agent's output as its input. Equivalent to a series of direct
+                edges.
+              </li>
+              <li>
+                <code>workflow.AsAIAgent(name, description)</code> — wraps any
+                workflow as a single <code>AIAgent</code>. The caller sees one
+                agent; the framework executes the full graph internally. This is
+                concept <strong>#10 (workflow-as-agent)</strong> — it composes:
+                you can nest workflow-agents inside larger workflows.
+              </li>
+            </ul>
+            <p>
+              <strong>The data contract:</strong> each analyst receives the user
+              prompt. Its output goes into the workflow transcript. The
+              summarizer receives the <em>aggregated transcript</em> of all
+              previous agents as its context — which is why the instruction "Do
+              not call tools" is load-bearing for the summarizer: by the time it
+              runs, the facts are already in the message history.
+            </p>
+          </div>
+
+          <h2>Build it</h2>
+          <ol class="steps">
+            <li>
+              <h3>Author the analyst instructions</h3>
+              <p>
+                Each of the three analyst agents needs a focused prompt: one
+                investigates cost, one security signals, one tooling health.
+                They share a common contract — "no pleasantries, no questions
+                back, your output feeds another agent" — so you enforce that in
+                a shared constant and interpolate per-domain scope on top.
+              </p>
+              <p>
+                The summarizer is different: it receives findings from all three
+                analysts and must assemble a coherent markdown report without
+                calling any tools. The
+                <code>Do not call tools</code> guard is mandatory — without it
+                the summarizer may try to gather its own data, doubling cost and
+                producing an incoherent output.
+              </p>
+              <div class="callout callout--note">
+                <span class="callout-label">ℹ️ Cumulative state</span>
+                <p>
+                  <code>Instructions.SchemaDoc</code> is a
+                  <code>const string</code> defined in
+                  <code>Agents/Instructions.cs</code> (introduced in
+                  <a href="../lesson01/index.html">A1</a>). It embeds the
+                  ClickHouse table schema so every agent that uses it
+                  automatically gets up-to-date column knowledge.
+                  <code>ModelTiers.Analyst(config)</code> and
+                  <code>ModelTiers.Reasoning(config)</code> come from
+                  <code>Agents/ModelTiers.cs</code> introduced in
+                  <a href="../lesson01/index.html">A1</a> — it is already
+                  available; use it directly.
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Agents/AnalystInstructions.cs</span>
+                </div>
+                <pre class="code-block"><code>namespace AiAgent.Agents;
+
+public static class AnalystInstructions
+{
+    private const string AnalystCommon = $"""
+        You are one specialist in a reporting pipeline. Investigate ONLY your domain
+        using the SQL tools, then output your findings as a compact markdown section:
+        headline numbers first, then 2-4 bullet observations. Mention anything unusual
+        explicitly. No pleasantries, no questions back — your output feeds another agent.
+        Run at most 4 queries.
+
+        {Instructions.SchemaDoc}
+        """;
+
+    public const string Cost = $"""
+        DOMAIN: cost &amp; token economics for the requested time window.
+        Investigate: spend per project FIRST (the fundamental access unit — scope to
+        one project if the request names one), total spend, spend per model, most
+        expensive sessions, cache-read vs input token ratio (cache economics), spend trend vs the
+        previous window of the same length.
+
+        {AnalystCommon}
+        """;
+
+    public const string Security = $"""
+        DOMAIN: security signals for the requested time window.
+        Investigate: credential_exposures (which files, which categories),
+        blocked_tools (what was denied, FINAL + completed=0), file deletions in
+        file_mutations, and unusual domains in websites_visited.
+
+        {AnalystCommon}
+        """;
+
+    public const string Tooling = $"""
+        DOMAIN: tooling health for the requested time window.
+        Investigate: tool call volumes and failure rates (event tool_result,
+        success != 'true'), slowest tools by avg duration_ms, compaction_events
+        frequency (a long/expensive-session smell), and subagent usage if present.
+
+        {AnalystCommon}
+        """;
+
+    public const string Summarizer = """
+        You are the report writer at the end of a pipeline. You receive findings from
+        three specialist analysts: cost, security, and tooling. Produce ONE coherent
+        report in markdown:
+
+        # Claude Code Report
+        ## Highlights        (3-5 bullets, the things a team lead must know)
+        ## Cost              (condensed from the cost analyst)
+        ## Security          (condensed from the security analyst)
+        ## Tooling           (condensed from the tooling analyst)
+        ## Anomalies &amp; Recommendations   (anything unusual + 1-3 concrete suggestions)
+
+        Keep numbers exact as given by the analysts. Do not invent data. Do not call tools.
+        """;
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>v1 — hand-build the graph (conceptual sketch)</h3>
+              <p>
+                Using only the raw <code>WorkflowBuilder</code> from
+                <a href="../lesson04/index.html">B1</a>, you can build this
+                pipeline by hand. The shape is: three analyst executor-nodes
+                fanned out from a single start message; a fan-in barrier waits
+                for all three; the aggregated output feeds a summarizer
+                executor-node. The tabs below contrast the two versions.
+              </p>
+
+              <div class="tabs">
+                <div class="tab-bar">
+                  <button class="tab-btn active">
+                    v1 — raw graph (illustrative)
+                  </button>
+                  <button class="tab-btn">
+                    v2 — builder sugar (real code)
+                  </button>
+                </div>
+
+                <div class="tab-panel active">
+                  <div class="callout callout--pitfall">
+                    <span class="callout-label"
+                      >⚠️ DO NOT COMPILE — illustrative pseudocode only</span
+                    >
+                    <p>
+                      The v1 snippet below uses
+                      <code>ReportRequest</code>, <code>AnalystFindings</code>,
+                      <code>AggregatedFindings</code>, and
+                      <code>WorkflowBuilder.StartNodeName</code> — these types
+                      <strong>do not exist</strong> in MAF and will produce
+                      compile errors. This is a conceptual sketch to show the
+                      graph shape that <code>BuildConcurrent</code> /
+                      <code>BuildSequential</code> generate internally.
+                      <strong
+                        >Only the v2 tab (ReportWorkflow.cs) is real
+                        code.</strong
+                      >
+                    </p>
+                  </div>
+                  <div class="codewrap">
+                    <pre
+                      class="code-block"
+                    ><code>// v1: ILLUSTRATIVE PSEUDOCODE — do NOT compile.
+// These types (ReportRequest, AnalystFindings, AggregatedFindings,
+// WorkflowBuilder.StartNodeName) do not exist in MAF.
+// Purpose: show the graph shape that BuildConcurrent / BuildSequential
+// produce internally — once you understand the shape, use the v2 form.
+
+var builder = new WorkflowBuilder();
+
+// Three analyst agent-nodes
+builder.AddNode&lt;ReportRequest, AnalystFindings&gt;("CostAnalyst",
+    async (msg, ctx, ct) =&gt;
+    {
+        var result = await costAnalyst.RunAsync(msg.Prompt, ct);
+        return new AnalystFindings("CostAnalyst", result.Text);
+    });
+
+builder.AddNode&lt;ReportRequest, AnalystFindings&gt;("SecurityAnalyst",
+    async (msg, ctx, ct) =&gt;
+    {
+        var result = await securityAnalyst.RunAsync(msg.Prompt, ct);
+        return new AnalystFindings("SecurityAnalyst", result.Text);
+    });
+
+builder.AddNode&lt;ReportRequest, AnalystFindings&gt;("ToolingAnalyst",
+    async (msg, ctx, ct) =&gt;
+    {
+        var result = await toolingAnalyst.RunAsync(msg.Prompt, ct);
+        return new AnalystFindings("ToolingAnalyst", result.Text);
+    });
+
+// Fan-out: one input message -&gt; all three analyst nodes
+builder.AddFanOutEdge&lt;ReportRequest&gt;(
+    sourceNode: WorkflowBuilder.StartNodeName,
+    targetNodes: ["CostAnalyst", "SecurityAnalyst", "ToolingAnalyst"],
+    partitioner: (msg, idx) =&gt; msg);   // same prompt to each
+
+// Fan-in barrier: all three findings -&gt; summarizer
+builder.AddFanInEdge&lt;AnalystFindings, AggregatedFindings&gt;(
+    sourceNodes: ["CostAnalyst", "SecurityAnalyst", "ToolingAnalyst"],
+    targetNode: "Summarizer",
+    aggregator: findings =&gt; new AggregatedFindings(findings));
+
+builder.AddNode&lt;AggregatedFindings, string&gt;("Summarizer",
+    async (msg, ctx, ct) =&gt;
+    {
+        var context = string.Join("\n\n", msg.Items.Select(f =&gt; f.Content));
+        var result = await summarizer.RunAsync(context, ct);
+        return result.Text;
+    });
+
+builder.SetOutputNode("Summarizer");
+var workflow = builder.Build();
+// To expose as one agent: workflow.AsAIAgent("telemetry-report", "...")</code></pre>
+                  </div>
+                </div>
+
+                <div class="tab-panel">
+                  <p>
+                    This is the real file. It is split into four chunks below;
+                    paste them in order into one file. First, the using
+                    directives, the namespace, and the Anthropic client. The
+                    client is built once and shared by all four agents.
+                  </p>
+                  <div class="codewrap">
+                    <div class="code-meta">
+                      <span class="filename">Agents/ReportWorkflow.cs</span>
+                    </div>
+                    <pre class="code-block"><code>using AiAgent.Tools;
+using Anthropic;
+using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Workflows;
+using Microsoft.Extensions.AI;
+
+namespace AiAgent.Agents;
+
+public static class ReportWorkflow
+{
+    public static AIAgent Create(IConfiguration config, SchemaTools tools, AnalysisTools analysis)
+    {
+        var apiKey = config["ANTHROPIC_API_KEY"]
+            ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not set.");
+
+        IAnthropicClient client = new AnthropicClient { ApiKey = apiKey };</code></pre>
+                  </div>
+                  <p>
+                    Next, pick the model tiers and the tool list. The three
+                    analysts gather data with SQL, so they run on the cheaper
+                    <code>Analyst</code> tier and get the SQL tools. The
+                    summarizer only writes prose from data already gathered, so
+                    it runs on the more expensive <code>Reasoning</code> tier
+                    and gets no tools. The <code>sqlTools</code> list is passed
+                    to each analyst in the next chunk.
+                  </p>
+                  <div class="codewrap">
+                    <pre
+                      class="code-block"
+                    ><code>        var analystModel = ModelTiers.Analyst(config);
+        var reasoningModel = ModelTiers.Reasoning(config);
+
+        List&lt;AITool&gt; sqlTools =
+        [
+            AIFunctionFactory.Create(tools.GetSchema),
+            AIFunctionFactory.Create(tools.RunSql),
+            AIFunctionFactory.Create(tools.ListProjects),
+            AIFunctionFactory.Create(analysis.CostBreakdown),
+            AIFunctionFactory.Create(analysis.SessionDeepDive),
+        ];</code></pre>
+                  </div>
+                  <p>
+                    Now create the four agents and assemble the graph. The three
+                    analysts get the SQL tools; the summarizer gets
+                    <code>tools: null</code>. <code>BuildConcurrent</code> wraps
+                    the three analysts as a fan-out that runs them in parallel.
+                    <code>AsAIAgent</code> packs that fan-out into one agent
+                    named <code>"Analysts"</code>. <code>BuildSequential</code>
+                    then puts that one agent before the summarizer, so the
+                    summarizer reads the aggregated analyst output. The outer
+                    <code>AsAIAgent</code> exposes the whole graph as one agent
+                    named <code>"telemetry-report"</code>, which the
+                    <code>/report</code> endpoint resolves from DI.
+                  </p>
+                  <div class="codewrap">
+                    <pre
+                      class="code-block"
+                    ><code>        var costAnalyst    = CreateAnalyst(client, analystModel,   "CostAnalyst",     AnalystInstructions.Cost,     sqlTools);
+        var securityAnalyst = CreateAnalyst(client, analystModel,  "SecurityAnalyst",  AnalystInstructions.Security, sqlTools);
+        var toolingAnalyst  = CreateAnalyst(client, analystModel,  "ToolingAnalyst",   AnalystInstructions.Tooling,  sqlTools);
+        var summarizer      = CreateAnalyst(client, reasoningModel, "Summarizer",       AnalystInstructions.Summarizer, tools: null);
+
+        var analystsWorkflow = AgentWorkflowBuilder.BuildConcurrent(
+            [costAnalyst, securityAnalyst, toolingAnalyst]);
+
+        var analystsAgent = analystsWorkflow.AsAIAgent(
+            name: "Analysts",
+            description: "Runs cost, security and tooling analysts concurrently.");
+
+        var reportWorkflow = AgentWorkflowBuilder.BuildSequential([analystsAgent, summarizer]);
+
+        return reportWorkflow.AsAIAgent(
+            name: "telemetry-report",
+            description: "Produces a Claude Code telemetry report for the requested window.");
+    }</code></pre>
+                  </div>
+                  <p>
+                    Last, the helper that builds each analyst. It wraps the
+                    agent with <code>UseOpenTelemetry</code> so each analyst
+                    emits its own <code>invoke_agent</code> span. These spans
+                    let the trace timeline show the three analysts overlapping,
+                    which is the proof that they ran in parallel.
+                    <code>AgentFactory.OtelSourceName</code> comes from
+                    <code>Agents/AgentFactory.cs</code> (introduced in
+                    <a href="../lesson09/index.html">C2</a>) and is already
+                    available.
+                  </p>
+                  <div class="codewrap">
+                    <pre
+                      class="code-block"
+                    ><code>    private static AIAgent CreateAnalyst(
+        IAnthropicClient client, string model, string name, string instructions, List&lt;AITool&gt;? tools)
+    {
+        var agent = client.AsAIAgent(model: model, instructions: instructions, name: name, tools: tools);
+
+        return agent.AsBuilder()
+            .UseOpenTelemetry(AgentFactory.OtelSourceName)
+            .Build();
+    }
+}</code></pre>
+                  </div>
+                </div>
+              </div>
+
+              <div class="callout callout--note">
+                <span class="callout-label">ℹ️</span>
+                <p>
+                  <strong>Why nest two <code>AsAIAgent</code> calls?</strong>
+                  The inner call wraps the concurrent fan-out as a single unit
+                  named
+                  <code>"Analysts"</code>. The outer
+                  <code>BuildSequential</code> then treats that whole concurrent
+                  block as <em>one stage</em> before the summarizer. This
+                  two-level nesting — concurrent inside sequential — is the
+                  idiomatic MAF way to express "all of these in parallel, then
+                  this one."
+                </p>
+              </div>
+            </li>
+
+            <li>
+              <h3>Wire a shared runner to avoid duplicated invocation logic</h3>
+              <p>
+                Both the <code>/report</code> endpoint and the menu registry in
+                <a href="../lesson12/index.html">D2</a> invoke the same workflow
+                agent. Rather than repeat the "take the last message, collect
+                author names" logic in two places, extract it into one static
+                helper.
+              </p>
+              <p>
+                Running a workflow agent returns the full transcript, not one
+                string. The helper reads two things out of it. The deliverable
+                is the <em>last</em> non-empty message — the summarizer's
+                report; earlier messages are the analyst findings. The
+                <code>AgentsInvolved</code> list collects the distinct author
+                names. The <code>/report</code> endpoint returns
+                <code>AgentsInvolved</code> in its JSON so the verify step can
+                confirm all four agents ran.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Agents/ReportRunner.cs</span>
+                </div>
+                <pre class="code-block"><code>using Microsoft.Agents.AI;
+
+namespace AiAgent.Agents;
+
+public static class ReportRunner
+{
+    public static async Task&lt;(string Report, List&lt;string&gt; AgentsInvolved)&gt; RunAsync(
+        AIAgent reportAgent, string window, CancellationToken ct)
+    {
+        var response = await reportAgent.RunAsync(
+            $"Produce the report for {window}.", cancellationToken: ct);
+
+        var lastMessage = response.Messages.LastOrDefault(m =&gt; !string.IsNullOrWhiteSpace(m.Text));
+        var agentsInvolved = response.Messages
+            .Select(m =&gt; m.AuthorName)
+            .Where(author =&gt; !string.IsNullOrEmpty(author))
+            .Distinct()
+            .Select(author =&gt; author!)
+            .ToList();
+
+        return (lastMessage?.Text ?? response.Text, agentsInvolved);
+    }
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Register the workflow agent and expose the endpoints</h3>
+              <p>
+                Register the workflow agent as a keyed singleton — keyed because
+                the DI container also holds the main <code>DataAnalyst</code> as
+                an unkeyed <code>AIAgent</code>, and the two must not collide.
+                The <code>/report</code> endpoint returns JSON; the
+                <code>/report/stream</code> endpoint emits SSE with per-agent
+                step events so the client can render progress as each analyst
+                finishes.
+              </p>
+              <div class="callout callout--note">
+                <span class="callout-label">ℹ️ Already available</span>
+                <p>
+                  <code>[FromKeyedServices]</code> is in the
+                  <code>Microsoft.Extensions.DependencyInjection</code>
+                  namespace, which a minimal-API host already includes — no
+                  extra using needed. <code>SseEvent</code> is the static helper
+                  introduced in <a href="../lesson02/index.html">A2</a> and is
+                  already in <code>Program.cs</code>. Each chunk below names
+                  where it goes.
+                </p>
+              </div>
+              <p>
+                First, the DI registration. It goes in the DI block, before
+                <code>var app = builder.Build();</code>. The key
+                <code>"report"</code> keeps this agent separate from the unkeyed
+                <code>DataAnalyst</code>. The endpoints below resolve it with
+                <code>[FromKeyedServices("report")]</code>, so the key string
+                must match in both places.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs (excerpts)</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddKeyedSingleton&lt;AIAgent&gt;("report", (sp, _) =&gt; ReportWorkflow.Create(
+    sp.GetRequiredService&lt;IConfiguration&gt;(),
+    sp.GetRequiredService&lt;SchemaTools&gt;(),
+    sp.GetRequiredService&lt;AnalysisTools&gt;()));</code></pre>
+              </div>
+              <p>
+                Next, the <code>/report</code> endpoint. It goes after
+                <code>var app = builder.Build();</code>. It calls
+                <code>ReportRunner</code> and returns the report plus the
+                <code>agentsInvolved</code> list as JSON.
+              </p>
+              <div class="codewrap">
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/report", async (ReportRequest? request,
+    [FromKeyedServices("report")] AIAgent reportAgent, CancellationToken ct) =&gt;
+{
+    var window = string.IsNullOrWhiteSpace(request?.Window) ? "the last 7 days" : request.Window;
+    var (report, agentsInvolved) = await ReportRunner.RunAsync(reportAgent, window, ct);
+    return Results.Ok(new { report, agentsInvolved });
+});</code></pre>
+              </div>
+              <p>
+                Then the <code>/report/stream</code> endpoint. It streams the
+                run instead of waiting for the end. Each time the author name
+                changes, it emits an <code>agent_step</code> event. The client
+                reads these events to show which analyst is running. The verify
+                step uses the order of these events to prove the analysts ran in
+                parallel.
+              </p>
+              <div class="codewrap">
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/report/stream", async (ReportRequest? request, HttpContext context,
+    [FromKeyedServices("report")] AIAgent reportAgent, CancellationToken ct) =&gt;
+{
+    var window  = string.IsNullOrWhiteSpace(request?.Window) ? "the last 7 days" : request!.Window;
+
+    context.Response.Headers.ContentType = "text/event-stream";
+    context.Response.Headers.CacheControl = "no-cache";
+
+    try
+    {
+        string? currentAgent = null;
+        await foreach (var update in reportAgent.RunStreamingAsync(
+            $"Produce the report for {window}.", cancellationToken: ct))
+        {
+            if (!string.IsNullOrEmpty(update.AuthorName) &amp;&amp; update.AuthorName != currentAgent)
+            {
+                currentAgent = update.AuthorName;
+                await SseEvent.WriteAsync(context.Response, "agent_step", new { agent = currentAgent }, ct);
+            }
+            if (!string.IsNullOrEmpty(update.Text))
+                await SseEvent.WriteAsync(context.Response, "token",
+                    new { agent = currentAgent, text = update.Text }, ct);
+        }
+        await SseEvent.WriteAsync(context.Response, "done", new { }, ct);
+    }
+    catch (Exception ex)
+    {
+        await SseEvent.WriteAsync(context.Response, "error", new { message = ex.Message }, ct);
+    }
+});</code></pre>
+              </div>
+              <p>
+                Last, declare the request record at file scope, after
+                <code>app.Run();</code>, with the other request records:
+                <code
+                  >internal sealed record ReportRequest(string? Window);</code
+                >
+              </p>
+            </li>
+          </ol>
+
+          <h2>Why the reveal matters</h2>
+          <p>
+            The v1 graph and the v2 builder call produce the same runtime
+            execution: three concurrent superstep nodes followed by one
+            sequential node. The difference is purely in how much bookkeeping
+            you own. The raw builder lets you customize partitioners, edge
+            predicates, and custom executors — as you will in
+            <a href="../lesson04/index.html">B1</a>–<a
+              href="../lesson06/index.html"
+              >B3</a
+            >
+            and again in F2's investigation pipeline. The high-level builders
+            buy you terseness at the cost of control. Now that you have seen
+            both, you can choose the right level for each situation.
+          </p>
+
+          <div class="callout callout--evolution">
+            <span class="callout-label">🔄 Evolution arc</span>
+            <p>
+              <strong>Arc 3 of 7.</strong> The hand-built v1 graph above is
+              shown only to reveal the graph the builders generate — its sole
+              purpose was to demystify the sugar; you keep v2. The v2
+              <code>ReportWorkflow</code> created here becomes a first-class
+              menu item in <a href="../lesson12/index.html">D2</a> (the router +
+              menu registry), is wrapped as an agent-as-tool on the DataAnalyst
+              in D3, and survives all the way to the Capstone where it is
+              exposed over A2A.
+            </p>
+          </div>
+
+          <h2>Verify</h2>
+          <div class="gate">
+            <p class="gate-title">✅ Gate — do not advance until green</p>
+
+            <p><strong>Check 1 — report names all four agents:</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/report \
+  -H "Content-Type: application/json" \
+  -d '{"window":"last 7 days"}' | jq '.agentsInvolved'
+# Must contain: "CostAnalyst", "SecurityAnalyst", "ToolingAnalyst", "Summarizer"</code></pre>
+            </div>
+
+            <p>
+              <strong
+                >Check 2 — analyst steps interleave on the stream (concurrency
+                is real):</strong
+              >
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -N -X POST http://localhost:8124/report/stream \
+  -H "Content-Type: application/json" \
+  -d '{"window":"last 7 days"}'
+# You MUST see agent_step events for CostAnalyst, SecurityAnalyst, and ToolingAnalyst
+# BEFORE the agent_step event for Summarizer.
+# The three analyst steps may appear in any order relative to each other (they ran in parallel).
+# The Summarizer agent_step MUST be the last one before "done".</code></pre>
+            </div>
+
+            <p>
+              <strong>Check 3 — v1 and v2 produce equivalent structure:</strong>
+            </p>
+            <p>
+              If you built v1 locally before replacing it: both should return a
+              markdown document with <code>## Cost</code>,
+              <code>## Security</code>, <code>## Tooling</code>, and
+              <code>## Highlights</code> sections. The exact wording will differ
+              (LLM output), but the section headings prove the same pipeline
+              shape ran.
+            </p>
+
+            <p>
+              <strong>Negative test — fan-out degraded to sequential:</strong>
+            </p>
+            <p>
+              If the three <code>agent_step</code> events for the analysts
+              appear in strict sequence (one done event each, no interleaving
+              timestamps), the concurrent fan-out is not working — the agents
+              are being run one after another. Verify that
+              <code>BuildConcurrent</code> was applied to all three analysts
+              before wrapping them with <code>AsAIAgent</code>, not
+              <code>BuildSequential</code>.
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ Pitfalls</span>
+            <ul>
+              <li>
+                <strong
+                  >Analysts respond conversationally instead of
+                  reporting</strong
+                >
+                → the prompt contract "your output feeds another agent" is
+                missing. Without it, the model asks clarifying questions or adds
+                pleasantries, which pollutes the summarizer's context and
+                produces a confused report. The
+                <code>AnalystCommon</code> constant enforces this.
+              </li>
+              <li>
+                <strong>Summarizer calls SQL tools and invents data</strong> →
+                the summarizer has <code>tools: null</code> in
+                <code>CreateAnalyst</code>. If tools are accidentally passed,
+                the summarizer will sometimes try to gather its own numbers — at
+                double the cost and with inconsistent grounding. Also: without
+                <em>"Do not call tools"</em> in its instructions, even a
+                tool-less summarizer may claim it cannot answer because it "has
+                no access to data."
+              </li>
+              <li>
+                <strong
+                  >Keyed registration not found — DI throws at startup</strong
+                >
+                → the endpoint uses <code>[FromKeyedServices("report")]</code>;
+                if the registration used a different key string (or was
+                registered without a key), the app crashes on first request, not
+                at startup. Verify the key string matches exactly in both
+                <code>AddKeyedSingleton</code> and the endpoint attribute.
+              </li>
+              <li>
+                <strong>Wrong message taken from the transcript</strong> →
+                <code>RunAsync</code> on a workflow agent returns the full
+                conversation transcript. Taking <code>response.Text</code> gives
+                only the last update, which may be incomplete.
+                <code>ReportRunner</code> uses
+                <code
+                  >response.Messages.LastOrDefault(m =&gt;
+                  !string.IsNullOrWhiteSpace(m.Text))</code
+                >
+                — the last non-empty message — which is reliably the
+                Summarizer's output.
+              </li>
+              <li>
+                <strong>OTel spans show no concurrency</strong> → each analyst
+                needs its own <code>UseOpenTelemetry</code> call (done in
+                <code>CreateAnalyst</code>). Without it, analysts share the
+                default span context and the trace timeline collapses into a
+                single sequential-looking line even if the graph ran
+                concurrently.
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              Mark lesson complete
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

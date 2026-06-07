@@ -1,0 +1,635 @@
+<!doctype html>
+<!-- lesson09/index.html — C2: Observability: middleware + OTel -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>C2 · Observability: middleware + OTel — MAF Curriculum</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="09">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">Curriculum</a> / Module C / C2
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">
+              Lesson 09 · C2 · Module C — The product
+            </p>
+            <h1>Observability: middleware + OTel</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★</span>
+              <span class="badge badge--cost">Haiku</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>What you'll learn</h2>
+          <p>
+            The agent runs on its own. It picks which SQL tools to call and how
+            many model round-trips to make. When a run costs too much or calls a
+            tool you did not expect, you have no record of it. You cannot say
+            which tools ran, how many tokens you paid for, or how long each call
+            took.
+            <strong
+              >C2 makes every model round-trip and every tool call visible after
+              the fact.</strong
+            >
+            A delegating chat client logs each round-trip in the console, and
+            <code>UseOpenTelemetry</code> writes structured spans into the same
+            ClickHouse the agent already queries.
+          </p>
+          <p>
+            There are two seams. They sit at different levels and see different
+            things. The first is a delegating chat client. It wraps the model
+            provider and sees every raw round-trip: the messages going in, the
+            tool calls and token counts coming back. The second is
+            <code>UseOpenTelemetry</code> on the agent builder. It emits
+            <code>invoke_agent</code> and <code>execute_tool</code> spans into
+            any OpenTelemetry backend. In Claudalytics both seams export to the
+            same ClickHouse the agent queries. The product monitors itself. You
+            instrument once, then query the data forever.
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 Teach</span>
+            <h3>Two middleware seams</h3>
+            <p>
+              <strong>Seam 1 — DelegatingChatClient.</strong> This is the
+              <code>Microsoft.Extensions.AI</code> middleware pattern. You
+              subclass <code>DelegatingChatClient</code>, override
+              <code>GetResponseAsync</code> and
+              <code>GetStreamingResponseAsync</code>, and call
+              <code>base.*</code> to forward to the real provider. After the
+              forward you can do whatever you like with the result. The client
+              is wired into an agent through the
+              <code>clientFactory</code> parameter of
+              <code>client.AsAIAgent(…)</code>. The factory receives the raw
+              inner client and returns your wrapper. This runs for every model
+              round-trip. That includes the tool-calling loops inside a single
+              <code>RunAsync</code> call. So it is the right place for
+              per-request logging and cost tracking.
+            </p>
+            <p>
+              <strong
+                >Seam 2 — <code>UseOpenTelemetry(sourceName)</code>.</strong
+              >
+              Called on the <code>AIAgentBuilder</code> returned by
+              <code>agent.AsBuilder()</code>, this wires an OTel
+              <code>ActivitySource</code> into the agent. It emits two span
+              kinds automatically: <code>invoke_agent</code> (one per
+              <code>RunAsync</code> call) and <code>execute_tool</code>
+              (one per tool invocation). You name the source. That name becomes
+              the
+              <code>AddSource(…)</code> argument in your OTel pipeline
+              configuration.
+            </p>
+            <h3>Named API surfaces</h3>
+            <ul>
+              <li>
+                <code>DelegatingChatClient</code> — base class,
+                <code>Microsoft.Extensions.AI</code>
+              </li>
+              <li>
+                <code
+                  >client.AsAIAgent(options, clientFactory: inner =&gt; …)</code
+                >
+                — wires the middleware
+              </li>
+              <li>
+                <code
+                  >agent.AsBuilder().UseOpenTelemetry(sourceName).Build()</code
+                >
+                — adds OTel spans
+              </li>
+              <li>
+                <code
+                  >builder.Services.AddOpenTelemetry()…AddAspNetCoreInstrumentation()…AddSource(…)…AddOtlpExporter()</code
+                >
+                — the host-side pipeline
+              </li>
+            </ul>
+          </div>
+
+          <h2>How the two seams differ</h2>
+          <p>It helps to be concrete about what each seam sees and when:</p>
+          <table>
+            <thead>
+              <tr>
+                <th>Seam</th>
+                <th>Granularity</th>
+                <th>What you get</th>
+                <th>Wired at</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>DelegatingChatClient</td>
+                <td>Every model HTTP call</td>
+                <td>
+                  Raw messages, <code>FunctionCallContent</code>, token counts,
+                  streaming chunks
+                </td>
+                <td><code>clientFactory</code> in <code>AsAIAgent</code></td>
+              </tr>
+              <tr>
+                <td>UseOpenTelemetry</td>
+                <td>Per agent invocation + per tool execution</td>
+                <td>
+                  Structured OTel spans: <code>invoke_agent</code>,
+                  <code>execute_tool</code>, model-id attributes
+                </td>
+                <td><code>AsBuilder().UseOpenTelemetry(…).Build()</code></td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            Use the delegating client for anything you want in logs — it's
+            simple, synchronous, and always available in the process. Use OTel
+            for anything you want to query, aggregate, or alert on — it goes to
+            ClickHouse and lives alongside your Claudalytics session data.
+          </p>
+
+          <h2>Build it</h2>
+          <ol class="steps">
+            <li>
+              <h3>Step 1 — Write the delegating chat client</h3>
+              <p>
+                Create <code>Middleware/ToolCallLoggingChatClient.cs</code>.
+                This class is Seam 1. It sits between the agent and the
+                Anthropic provider. The agent factory in Step 2 wires it in, and
+                the console reads its log lines. The class extends
+                <code>DelegatingChatClient</code> and takes the inner client
+                plus an <code>ILogger</code> through its constructor. This is
+                standard .NET DI, with nothing MAF-specific.
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 Setup — packages</span>
+                <p>
+                  C2 introduces OpenTelemetry. Add three packages before writing
+                  any code (versions are pinned in
+                  <code>AiAgent.csproj</code>):
+                </p>
+                <div class="codewrap">
+                  <pre
+                    class="code-block"
+                  ><code>dotnet add package OpenTelemetry.Extensions.Hosting --version 1.15.3
+dotnet add package OpenTelemetry.Exporter.OpenTelemetryProtocol --version 1.15.3
+dotnet add package OpenTelemetry.Instrumentation.AspNetCore --version 1.15.2</code></pre>
+                </div>
+              </div>
+
+              <p>
+                The non-streaming override comes first. It calls
+                <code>base.GetResponseAsync</code> to forward the request to the
+                real provider. Then it walks the response messages, finds each
+                <code>FunctionCallContent</code> item, and logs the tool name
+                and arguments. When <code>response.Usage</code> is present, it
+                also logs the input and output token counts. This is where
+                per-request cost tracking lives. The project enables implicit
+                usings, but <code>ILogger</code> does not resolve without the
+                explicit <code>using Microsoft.Extensions.Logging;</code> line.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Middleware/ToolCallLoggingChatClient.cs — class +
+                    non-streaming override</span
+                  >
+                </div>
+                <pre class="code-block"><code>using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
+
+namespace AiAgent.Middleware;
+
+public sealed class ToolCallLoggingChatClient(IChatClient innerClient, ILogger logger)
+    : DelegatingChatClient(innerClient)
+{
+    public override async Task&lt;ChatResponse&gt; GetResponseAsync(
+        IEnumerable&lt;ChatMessage&gt; messages, ChatOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        var response = await base.GetResponseAsync(messages, options, cancellationToken);
+
+        foreach (var call in response.Messages
+            .SelectMany(m =&gt; m.Contents)
+            .OfType&lt;FunctionCallContent&gt;())
+            logger.LogInformation("Tool call requested: {Tool} {Args}",
+                call.Name, System.Text.Json.JsonSerializer.Serialize(call.Arguments));
+
+        if (response.Usage is { } usage)
+            logger.LogInformation("Model round-trip: in={Input} out={Output} tokens",
+                usage.InputTokenCount, usage.OutputTokenCount);
+
+        return response;
+    }</code></pre>
+              </div>
+
+              <p>
+                The streaming override comes next, and it closes the class. The
+                streaming path goes through a different method than the
+                non-streaming one, so you must override both. It yields every
+                <code>ChatResponseUpdate</code> unchanged and never buffers. The
+                logging is a side effect that does not change the data flow.
+                This is the contract for any delegating client: stay
+                transparent, add behavior, and do not break the stream.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >ToolCallLoggingChatClient.cs — streaming override (then
+                    close the class)</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    public override async IAsyncEnumerable&lt;ChatResponseUpdate&gt; GetStreamingResponseAsync(
+        IEnumerable&lt;ChatMessage&gt; messages, ChatOptions? options = null,
+        [System.Runtime.CompilerServices.EnumeratorCancellation]
+        CancellationToken cancellationToken = default)
+    {
+        await foreach (var update in base.GetStreamingResponseAsync(
+            messages, options, cancellationToken))
+        {
+            foreach (var call in update.Contents.OfType&lt;FunctionCallContent&gt;())
+                logger.LogInformation("Tool call requested (stream): {Tool}", call.Name);
+            yield return update;
+        }
+    }
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Step 2 — Wire the middleware into the agent factory</h3>
+              <p>
+                This step turns on both seams. In
+                <code>Agents/AgentFactory.cs</code>, pass a
+                <code>clientFactory</code> lambda to
+                <code>client.AsAIAgent</code>. The lambda receives the raw
+                <code>IChatClient</code> (the Anthropic provider) and returns
+                your <code>ToolCallLoggingChatClient</code> from Step 1 wrapping
+                it. That is Seam 1. After that, chain
+                <code
+                  >.AsBuilder().UseOpenTelemetry(OtelSourceName).Build()</code
+                >
+                to add the OTel spans. That is Seam 2. The source name is a
+                public constant. The OTel pipeline in Step 3 reads it back from
+                <code>Program.cs</code>.
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 Note — cumulative file</span>
+                <p>
+                  <code>Agents/AgentFactory.cs</code> was started in
+                  <a href="../lesson08/index.html">C1</a>. Keep the complete
+                  file from C1 — all the <code>options</code>/<code>Tools</code>
+                  wiring stays exactly as-is. In C2 you make two additions only:
+                </p>
+                <ol>
+                  <li>
+                    Add <code>OtelSourceName</code> as a public constant (needed
+                    in Program.cs).
+                  </li>
+                  <li>
+                    Pass <code>clientFactory:</code> to
+                    <code>client.AsAIAgent</code> and chain
+                    <code
+                      >.AsBuilder().UseOpenTelemetry(OtelSourceName).Build()</code
+                    >
+                    on the result.
+                  </li>
+                </ol>
+                <p>
+                  Required usings at the top of
+                  <code>AgentFactory.cs</code> (all six should already be
+                  present from C1; add any that are missing):
+                </p>
+                <div class="codewrap">
+                  <pre class="code-block"><code>using AiAgent.Middleware;
+using AiAgent.Tools;
+using Anthropic;
+using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Compaction;
+using Microsoft.Extensions.AI;</code></pre>
+                </div>
+              </div>
+
+              <p>
+                The code below shows only the two C2 additions. The
+                <code>OtelSourceName</code> constant is new. Step 3 reads it
+                from <code>Program.cs</code>. The
+                <code>ChatClientAgentOptions</code> and
+                <code>Tools</code> wiring from C1 stays exactly as it was. The
+                <code>clientFactory:</code> argument is the only change to the
+                <code>AsAIAgent</code> call. The
+                <code>.AsBuilder().UseOpenTelemetry(...).Build()</code> chain on
+                the result is new.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Agents/AgentFactory.cs</span>
+                  <span
+                    style="
+                      margin-left: 1rem;
+                      font-size: 0.8em;
+                      color: var(--text-muted);
+                    "
+                    >excerpt — two C2 additions shown; keep all C1 content</span
+                  >
+                </div>
+                <pre class="code-block"><code>public static class AgentFactory
+{
+    public const string OtelSourceName = "Claudalytics.Agent";
+
+    public static AIAgent Create(
+        IConfiguration config,
+        SchemaTools tools,
+        AnalysisTools analysis,
+        ILoggerFactory loggerFactory)
+    {
+        var apiKey = config["ANTHROPIC_API_KEY"]
+            ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not set.");
+
+        IAnthropicClient client = new AnthropicClient { ApiKey = apiKey };
+
+        // ... ChatClientAgentOptions / Tools wiring unchanged from C1 ...
+
+        var agent = client.AsAIAgent(
+            options,
+            clientFactory: inner =&gt; new ToolCallLoggingChatClient(
+                inner, loggerFactory.CreateLogger&lt;ToolCallLoggingChatClient&gt;()),
+            loggerFactory: loggerFactory);
+
+        return agent.AsBuilder()
+            .UseOpenTelemetry(OtelSourceName)
+            .Build();
+    }
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Step 3 — Register the OTel pipeline in Program.cs</h3>
+              <p>
+                Seam 2 from Step 2 only emits spans if something listens for
+                them. This step adds that listener. In <code>Program.cs</code>,
+                call <code>builder.Services.AddOpenTelemetry()</code> and add
+                four things. The collector at the end of this pipeline writes
+                the spans to ClickHouse, which is the table the Verify gate
+                queries.
+              </p>
+              <ul>
+                <li>
+                  A service name — this becomes the
+                  <code>service.name</code> resource attribute on every span.
+                </li>
+                <li>
+                  <code>AddAspNetCoreInstrumentation()</code> — this is the
+                  <strong>critical line</strong> described in the pitfalls
+                  section below.
+                </li>
+                <li>
+                  <code>AddSource(…)</code> for your named source and the two
+                  MAF default sources.
+                </li>
+                <li>
+                  <code>AddOtlpExporter()</code> — points to the stack's OTel
+                  collector via <code>OTEL_EXPORTER_OTLP_ENDPOINT</code>.
+                </li>
+              </ul>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 Note — placement + usings</span>
+                <p>
+                  <strong>File:</strong> <code>Program.cs</code>.<br />
+                  <strong>Placement:</strong> add this block after all
+                  <code>builder.Services.*</code> registrations and
+                  <em>before</em> <code>var app = builder.Build();</code>.<br />
+                  <strong>Usings:</strong> add these two at the top of
+                  <code>Program.cs</code> alongside the existing using
+                  statements:
+                </p>
+                <div class="codewrap">
+                  <pre class="code-block"><code>using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;</code></pre>
+                </div>
+              </div>
+
+              <p>
+                The order of the three <code>AddSource</code> lines does not
+                matter. The first is your named source from Step 2, which
+                carries the <code>UseOpenTelemetry</code> spans. The second is
+                the MAF default agent source. The third is the
+                <code>Microsoft.Extensions.AI</code> chat-client source.
+                <code>AddAspNetCoreInstrumentation()</code> is not optional. The
+                pitfalls section explains why a missing line here empties the
+                whole trace table.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs</span>
+                  <span
+                    style="
+                      margin-left: 1rem;
+                      font-size: 0.8em;
+                      color: var(--text-muted);
+                    "
+                    >add after all builder.Services.* — before var app =
+                    builder.Build();</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource =&gt; resource.AddService("claudalytics-agent"))
+    .WithTracing(tracing =&gt; tracing
+        .AddAspNetCoreInstrumentation()
+        .AddSource(AgentFactory.OtelSourceName)
+        .AddSource("Experimental.Microsoft.Agents.AI")
+        .AddSource("Experimental.Microsoft.Extensions.AI")
+        .AddOtlpExporter());</code></pre>
+              </div>
+              <p>
+                The <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> env var is set in
+                <code>docker-compose</code> to point at the OpenTelemetry
+                Collector service in the stack. That collector fans out to
+                ClickHouse — the same table the agent queries with its SQL
+                tools. You do not need to configure the endpoint manually in
+                development if you run via <code>docker-compose up</code>.
+              </p>
+            </li>
+          </ol>
+
+          <h2>Why dogfooding matters here</h2>
+          <p>
+            The agent's job is to answer questions about Claudalytics telemetry.
+            By exporting its own spans to the same
+            <code>otel_traces</code> table, every agent run adds a row you can
+            query: which tools were called, how long each took, which model
+            handled which turn. You can literally ask the agent "how many tool
+            calls did you make in the last hour?" and it will query its own
+            trace data to answer. That feedback loop is worth building early —
+            it makes the
+            <a href="../lesson10/index.html">C3 (tool approval)</a> lesson's
+            safety story much more concrete because you can see the dangerous
+            calls in the trace table before you gate them.
+          </p>
+
+          <h2>Verify</h2>
+          <div class="gate">
+            <p class="gate-title">&#x2705; Gate — do not advance until green</p>
+
+            <p><strong>Start the stack in Testing mode:</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>dotnet run -- --environment Testing</code></pre>
+            </div>
+
+            <p><strong>Send one chat turn:</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message":"list my projects"}' | jq .</code></pre>
+            </div>
+
+            <p>
+              <strong>Check 1 — middleware log lines.</strong> In the console
+              you should see at least one line like:
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>info: AiAgent.Middleware.ToolCallLoggingChatClient[0]
+      Tool call requested: list_projects {"":""}
+info: AiAgent.Middleware.ToolCallLoggingChatClient[0]
+      Model round-trip: in=842 out=45 tokens</code></pre>
+            </div>
+
+            <p>
+              <strong>Check 2 — OTel spans in ClickHouse.</strong> After a few
+              seconds for the collector to flush, query
+              <code>otel_traces</code>:
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>SELECT ServiceName, SpanName, StatusCode
+FROM otel_traces
+WHERE ServiceName = 'claudalytics-agent'
+  AND Timestamp &gt; now() - INTERVAL 1 MINUTE
+ORDER BY Timestamp DESC
+LIMIT 20;</code></pre>
+            </div>
+            <p>
+              You should see rows with <code>SpanName</code> values including
+              <code>invoke_agent</code> and <code>execute_tool</code>.
+            </p>
+
+            <p>
+              <strong>Negative test — the silent sampler drop.</strong> Comment
+              out <code>.AddAspNetCoreInstrumentation()</code>, restart, send
+              the same chat turn, wait 10 seconds, re-run the ClickHouse query.
+              The <code>otel_traces</code> table returns
+              <strong>zero rows</strong> for this service — even though the
+              agent ran, the console logs appeared, and the HTTP response was
+              correct. An empty trace table while the agent is working is the
+              exact symptom of the missing ASP.NET instrumentation. Restore the
+              line before advancing.
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">&#x26A0;&#xFE0F; Pitfalls</span>
+            <ul>
+              <li>
+                <strong
+                  >Empty <code>otel_traces</code> even though the agent
+                  ran</strong
+                >
+                → <code>AddAspNetCoreInstrumentation()</code> is missing.
+                Without it, ASP.NET's own incoming-request activity is the root
+                span and the <code>ParentBased</code> sampler (the OTel default)
+                samples it at the same rate as the parent — which for an
+                unregistered source is 0 %. Every agent child span is silently
+                dropped. There is no warning; the agent works fine; the table is
+                empty. Add the line, restart.
+              </li>
+              <li>
+                <strong>Log lines appear but ClickHouse rows do not</strong> →
+                Wrong or unreachable <code>OTEL_EXPORTER_OTLP_ENDPOINT</code>.
+                The OTLP exporter silently swallows export errors by default.
+                Check <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> in your
+                environment (should be
+                <code>http://otel-collector:4317</code> inside Docker, or
+                <code>http://localhost:4317</code> if running the agent outside
+                the stack). You can enable exporter diagnostics with
+                <code>OTEL_EXPORTER_OTLP_TRACES_ENDPOINT</code> and
+                <code>OTEL_DIAGNOSTICS_FILE_DIRECTORY</code>.
+              </li>
+              <li>
+                <strong
+                  >Spans present but attributed to the wrong service
+                  name</strong
+                >
+                → <code>resource.AddService(…)</code> not called or called with
+                the wrong string. Check <code>ServiceName</code> in ClickHouse;
+                it should be <code>claudalytics-agent</code>.
+              </li>
+              <li>
+                <strong>Streaming chat produces no tool-call log lines</strong>
+                → The <code>GetStreamingResponseAsync</code> override is missing
+                or not calling <code>yield return update</code>. The streaming
+                path goes through a different method than the non-streaming one
+                — both must be overridden.
+              </li>
+              <li>
+                <strong
+                  ><code>UseOpenTelemetry</code> not found at compile
+                  time</strong
+                >
+                → You called it on the <code>AIAgent</code> directly instead of
+                on the builder. The call chain must be
+                <code
+                  >agent.AsBuilder().UseOpenTelemetry(sourceName).Build()</code
+                >.
+              </li>
+            </ul>
+          </div>
+
+          <h2>What comes next</h2>
+          <p>
+            With every agent span in ClickHouse you now have the data you need
+            to make the human approval gate in
+            <a href="../lesson10/index.html">C3</a> evidence-based: you can
+            query which SQL tool calls were most frequent, identify the ones
+            that hit large scans, and use that evidence to decide which tools
+            need a human gate. The middleware you built here feeds directly into
+            that decision.
+          </p>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              Mark lesson complete
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

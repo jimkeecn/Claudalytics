@@ -1,0 +1,24 @@
+# User-specific files and local settings
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Visual Studio 2015/2017/2019/2022 cache and work settings
+.vs/
+
+# Build results
+[Dd]ebug/
+[Db]ebugPS/
+[Rr]elease/
+[Rr]eleasePS/
+x64/
+x86/
+bbin/
+obj/
+
+# Roslyn cache directories
+*.prouser
+
+**/appsettings.Local.json
+checkpoints/

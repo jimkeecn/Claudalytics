@@ -1,0 +1,563 @@
+<!doctype html>
+<!-- lesson02/index.html — A2: Multi-turn memory (sessions) -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>A2 · Multi-turn memory — MAF Curriculum</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="02">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">Curriculum</a> / Module A / A2
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">
+              Lesson 02 · A2 · Module A — Hello agent
+            </p>
+            <h1>Multi-turn memory (sessions)</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★</span>
+              <span class="badge badge--cost">Haiku</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>What you'll learn</h2>
+          <p>
+            In <a href="../lesson01/index.html">A1</a> the Claudalytics Copilot
+            answered each question alone. A user could ask "What was the most
+            expensive project this week?" and then "And the day before that?",
+            but the model had no memory of the first question, so the follow-up
+            failed. The fix is a session. A <code>AgentSession</code> holds the
+            full message history for one conversation, and your server keeps
+            these sessions in a store so the model sees the earlier turns on
+            every new request.
+          </p>
+          <p>
+            In this lesson you add a server-side session store, keyed by a
+            session id the client sends back. You prove that the same id gives
+            the model context, and a missing id gives it a blank slate. Note one
+            limit you accept here: the store lives in process memory, so every
+            session is lost when the server restarts. That is fine for now;
+            <a href="../lesson07/index.html">B4</a> makes it durable.
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 Teach</span>
+            <h3>AgentSession and the session store</h3>
+            <p>
+              MAF represents one conversation thread as an
+              <code>AgentSession</code>. You create one by calling
+              <code>agent.CreateSessionAsync()</code>, and you pass it into
+              every subsequent
+              <code>agent.RunAsync(message, session)</code> call. The session
+              accumulates all messages — user turns, assistant replies, tool
+              calls and results — so the model sees its own prior reasoning on
+              every subsequent turn.
+            </p>
+            <p>
+              The session object itself lives only in memory. To make it survive
+              across HTTP requests you need a server-side store. The project
+              uses a
+              <code>ConcurrentDictionary&lt;string, AgentSession&gt;</code>
+              registered as a singleton, keyed by a string id that the client
+              echoes on follow-up requests.
+            </p>
+            <p>Key API surfaces in this lesson:</p>
+            <ul>
+              <li>
+                <code>agent.CreateSessionAsync(CancellationToken)</code> —
+                allocates a new empty thread.
+              </li>
+              <li>
+                <code
+                  >agent.RunAsync(string message, AgentSession session,
+                  ...)</code
+                >
+                — runs one turn inside the thread.
+              </li>
+              <li>
+                <code>ConcurrentDictionary&lt;string, AgentSession&gt;</code> —
+                the server-side store.
+              </li>
+              <li>
+                <code>GetOrCreateSessionAsync</code> — the helper pattern: look
+                up by id or mint a new one.
+              </li>
+            </ul>
+          </div>
+
+          <h2>Why two concepts must stay separate</h2>
+          <p>
+            It is easy to think "the session id <em>is</em> the session." It is
+            not. The <strong>session id</strong> is a string your server makes
+            (a GUID). The client gets it on the first response and sends it back
+            on follow-ups. The <strong>session</strong> is a live in-memory
+            object that holds the message list. Your store maps the id to the
+            object. If you skip the store, every request creates a new session.
+            Then every follow-up looks like a first question, and the model has
+            no memory.
+          </p>
+
+          <h2>Build it</h2>
+          <ol class="steps">
+            <li>
+              <h3>Register the session store as a singleton</h3>
+              <p>
+                The store is the one place every <code>/chat</code> request
+                reads from and writes to. It must be a single shared instance
+                for the whole app, so you register it as a singleton. The
+                <code>/chat</code> handler in step 4 injects this same
+                dictionary and uses it to find or save sessions.
+              </p>
+              <p>
+                Add one line to <code>Program.cs</code> in the DI block, after
+                your agent registration and before
+                <code>var app = builder.Build();</code>. A
+                <code>ConcurrentDictionary</code> is safe for concurrent HTTP
+                requests. A plain <code>Dictionary</code> will race.
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 Note</span>
+                <p>
+                  <strong>Required usings for this step</strong> — add to the
+                  top of <code>Program.cs</code> if not already present:
+                </p>
+                <ul>
+                  <li>
+                    <code>using System.Collections.Concurrent;</code> —
+                    <code>ConcurrentDictionary&lt;,&gt;</code>
+                  </li>
+                  <li>
+                    <code>using Microsoft.Agents.AI;</code> —
+                    <code>AgentSession</code> (already in
+                    <a href="../lesson01/index.html">A1</a> if you added it
+                    there)
+                  </li>
+                </ul>
+                <p>
+                  <strong>No new NuGet packages</strong> — both types ship in
+                  <code>Microsoft.Agents.AI</code> which you installed in A1.
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddSingleton&lt;ConcurrentDictionary&lt;string, AgentSession&gt;&gt;();</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Add sessionId to the chat request model</h3>
+              <p>
+                The helper in step 3 reads <code>SessionId</code> to decide
+                whether to reuse a session or make a new one. So the request
+                model needs a place to carry it. The client sends its session id
+                on every follow-up. When the id is missing, that means "start a
+                new conversation." Keep the record small.
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 Note</span>
+                <p>
+                  <strong
+                    >Replace your A1 <code>ChatRequest</code> record with this
+                    version</strong
+                  >
+                  — do not declare it twice. Place it at file scope in
+                  <code>Program.cs</code> after <code>app.Run();</code>.
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — file scope, after app.Run()</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>internal sealed record ChatRequest(string Message, string? SessionId);</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Write the GetOrCreate helper</h3>
+              <p>
+                This helper holds the lookup-or-create logic in one place, so
+                the
+                <code>/chat</code> handler in step 4 stays short. It does two
+                jobs. First it picks a session id: the one the client sent, or a
+                new GUID if none was sent. Then it finds the
+                <code>AgentSession</code> for that id in the store, or creates
+                one and saves it. It returns both the id and the session. The
+                handler in step 4 uses the id in its reply and passes the
+                session to <code>RunAsync</code>.
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 Note</span>
+                <p>
+                  <strong>Placement:</strong> this is a file-scope
+                  <code>static</code> local function. Place it in
+                  <code>Program.cs</code> <em>after</em>
+                  <code>app.Run();</code> — putting it before
+                  <code>app.Run()</code> causes CS8803 ("Top-level statements
+                  must precede namespace and type declarations").
+                </p>
+                <p>
+                  <strong>Cumulative state:</strong> your A1
+                  <code>Program.cs</code> must already have
+                  <code>using Microsoft.Agents.AI;</code> (for
+                  <code>AgentSession</code>) and
+                  <code>using System.Collections.Concurrent;</code> (added in
+                  step 1 above).
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — file-scope static, after app.Run()</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>static async Task&lt;(string SessionId, AgentSession Session)&gt; GetOrCreateSessionAsync(
+    string? requestedSessionId, AIAgent agent,
+    ConcurrentDictionary&lt;string, AgentSession&gt; sessions, CancellationToken ct)
+{
+    var sessionId = string.IsNullOrWhiteSpace(requestedSessionId)
+        ? Guid.NewGuid().ToString("N")
+        : requestedSessionId;
+
+    if (!sessions.TryGetValue(sessionId, out var session))
+    {
+        session = await agent.CreateSessionAsync(ct);
+        sessions[sessionId] = session;
+    }
+
+    return (sessionId, session);
+}</code></pre>
+              </div>
+              <p>
+                Two details are worth noticing.
+                <code>Guid.NewGuid().ToString("N")</code> makes a compact
+                32-character hex string with no dashes, which is easy to copy in
+                curl. And <code>TryGetValue</code> followed by a plain
+                assignment is safe here, because the read path of
+                <code>ConcurrentDictionary</code> is lock-free. If two first
+                requests for the same id arrive at once, the race is harmless.
+                One session wins and the other is collected by the GC.
+              </p>
+            </li>
+
+            <li>
+              <h3>Wire the helper into the /chat endpoint</h3>
+              <p>
+                This step connects the pieces from steps 1 to 3. The handler
+                injects the store from step 1, calls the helper from step 3, and
+                passes the returned session into <code>RunAsync</code> so the
+                model sees the full history. It sends the session id back in the
+                response. The client reads that id and sends it again on the
+                next turn, which is what keeps the conversation threaded.
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 Note</span>
+                <p>
+                  <strong
+                    >Replace your A1 <code>/chat</code> handler with this
+                    version</strong
+                  >
+                  — do not register the same
+                  <code>MapPost("/chat", ...)</code> route twice or the app will
+                  throw on startup. Place this in the endpoints block after
+                  <code>var app = builder.Build();</code>.
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — endpoints block, after var app =
+                    builder.Build()</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/chat", async (ChatRequest request, AIAgent agent,
+    ConcurrentDictionary&lt;string, AgentSession&gt; sessions,
+    CancellationToken ct) =&gt;
+{
+    if (string.IsNullOrWhiteSpace(request.Message))
+        return Results.BadRequest(new { error = "message is required" });
+
+    var (sessionId, session) = await GetOrCreateSessionAsync(
+        request.SessionId, agent, sessions, ct);
+
+    var response = await agent.RunAsync(request.Message, session, cancellationToken: ct);
+
+    return Results.Ok(new
+    {
+        sessionId,
+        answer = response.Text,
+    });
+});</code></pre>
+              </div>
+              <p>
+                The endpoint above is trimmed for clarity. The full
+                <code>Program.cs</code> also wires the router, approval
+                requests, and <code>RecentUserMessages</code> — those are
+                introduced in later lessons (<a href="../lesson12/index.html"
+                  >D2</a
+                >
+                for the router, <a href="../lesson10/index.html">C3</a> for
+                approvals).
+              </p>
+            </li>
+
+            <li>
+              <h3>How it wires together end-to-end</h3>
+              <p>
+                In the final <code>Program.cs</code> the same pattern is used
+                for both the synchronous <code>/chat</code> endpoint and the
+                streaming <code>/chat/stream</code> endpoint. The streaming path
+                calls <code>GetOrCreateSessionAsync</code> first, then passes
+                the session into <code>agent.RunStreamingAsync</code>. The
+                session is the same object with the same history, whether the
+                turn is blocking or streaming. This
+                <code>/chat/stream</code> endpoint is kept for the future
+                Angular chatbot front-end.
+              </p>
+              <div class="callout callout--note">
+                <span class="callout-label"
+                  >ℹ️ Preview only — do not add yet</span
+                >
+                <p>
+                  The snippet below is shown for orientation only. It references
+                  three types that are
+                  <strong>not defined until later lessons</strong>:
+                </p>
+                <ul>
+                  <li>
+                    <code>PendingApproval</code> — introduced in
+                    <a href="../lesson03/index.html">A3</a> (tool-approval
+                    HITL).
+                  </li>
+                  <li>
+                    <code>SseEvent</code> — introduced in
+                    <a href="../lesson03/index.html">A3</a> (SSE helpers).
+                  </li>
+                  <li>
+                    <code>ToolApprovalRequestContent</code> — introduced in
+                    <a href="../lesson10/index.html">C3</a> (approval content
+                    type).
+                  </li>
+                </ul>
+                <p>
+                  <strong
+                    >Do not copy this snippet into your
+                    <code>Program.cs</code> now.</strong
+                  >
+                  Add <code>/chat/stream</code> in full when you reach A3. The
+                  session-store wiring (<code>GetOrCreateSessionAsync</code>) is
+                  the only A2 addition.
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/chat/stream", async (HttpContext context, AIAgent agent,
+    ConcurrentDictionary&lt;string, AgentSession&gt; sessions,
+    ConcurrentDictionary&lt;string, PendingApproval&gt; approvals, CancellationToken ct) =&gt;
+{
+    var request = await context.Request.ReadFromJsonAsync&lt;ChatRequest&gt;(ct);
+    if (request is null || string.IsNullOrWhiteSpace(request.Message))
+    {
+        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+        return;
+    }
+
+    var (sessionId, session) = await GetOrCreateSessionAsync(
+        request.SessionId, agent, sessions, ct);
+
+    context.Response.Headers.ContentType = "text/event-stream";
+    context.Response.Headers.CacheControl = "no-cache";
+    await SseEvent.WriteAsync(context.Response, "session", new { sessionId }, ct);
+
+    // ... token/tool_call/done events follow — see A3 for the full implementation
+});</code></pre>
+              </div>
+              <p>
+                The <code>session</code> event is sent first. A client that
+                opened the stream without an id learns its new id right away,
+                before any tokens arrive.
+              </p>
+            </li>
+          </ol>
+
+          <h2>Verify</h2>
+          <div class="gate">
+            <p class="gate-title">✅ Gate — do not advance until green</p>
+
+            <p>
+              <strong>Start the server in Testing mode</strong> (the
+              <code>--</code> separator is load-bearing — see
+              <a href="../lesson01/index.html">A1</a> for the full explanation):
+            </p>
+
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>dotnet run -- --environment Testing</code></pre>
+            </div>
+
+            <p>
+              <strong
+                >Turn 1 — ask a time-sensitive question, capture the session
+                id:</strong
+              >
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What was the most expensive project this week?"}' \
+  | tee /tmp/t1.json</code></pre>
+            </div>
+            <p>
+              Copy the <code>sessionId</code> value from the response — it is a
+              32-char hex string.
+            </p>
+
+            <p>
+              <strong
+                >Turn 2 — follow up with a relative question using the same
+                id:</strong
+              >
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "And the day before that?", "sessionId": "PASTE_SESSION_ID_HERE"}' \
+  | tee /tmp/t2.json</code></pre>
+            </div>
+            <p>
+              The response must reference the same project name from turn 1, or
+              acknowledge the date shift coherently — proof the model saw both
+              messages. A confused or topic-changing answer means the session
+              was not threaded.
+            </p>
+
+            <p>
+              <strong
+                >Negative test — same follow-up WITHOUT the session id:</strong
+              >
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "And the day before that?"}' \
+  | tee /tmp/t3.json</code></pre>
+            </div>
+            <p>
+              This must produce a confused, vague, or clarifying-question
+              response — the model has no context for "the day before that." If
+              it answers coherently anyway, your
+              <code>GetOrCreateSessionAsync</code> is reusing the wrong session
+              (check that you are generating a fresh GUID when
+              <code>requestedSessionId</code> is null, not falling back to a
+              fixed key).
+            </p>
+
+            <p>
+              <strong
+                >Store check — confirm both sessions are independent:</strong
+              >
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code># The response from /tmp/t1.json and /tmp/t3.json must have DIFFERENT sessionId values.
+jq -r .sessionId /tmp/t1.json
+jq -r .sessionId /tmp/t3.json</code></pre>
+            </div>
+            <p>
+              Two different GUIDs confirm each sessionless request created its
+              own store entry.
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ Pitfalls</span>
+            <ul>
+              <li>
+                <strong>Session store registered as scoped or transient</strong>
+                → a fresh dictionary is injected per request; all stored
+                sessions are invisible to the next request. Register the
+                dictionary as a <code>Singleton</code>.
+              </li>
+              <li>
+                <strong
+                  >Passing <code>null</code> session to
+                  <code>RunAsync</code></strong
+                >
+                → MAF creates an anonymous ephemeral session internally; the
+                response has no id to return, and each request is a blank slate
+                even if the dictionary contains the right entry. Always pass the
+                retrieved or created <code>AgentSession</code>
+                explicitly.
+              </li>
+              <li>
+                <strong
+                  >Generating no id when <code>SessionId</code> is
+                  absent</strong
+                >
+                → every sessionless request reuses the same <code>""</code> or
+                <code>null</code>
+                key, contaminating a single shared session with every user's
+                messages. Mint a fresh GUID unconditionally when the caller
+                omits the id.
+              </li>
+              <li>
+                <strong>Session store is not persistent across restarts</strong>
+                → a <code>ConcurrentDictionary</code> lives only in process
+                memory. After <code>dotnet run</code> restarts, all sessions are
+                gone. For this lesson that is expected; persistence is addressed
+                in <a href="../lesson07/index.html">B4</a> via checkpoints.
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              Mark lesson complete
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

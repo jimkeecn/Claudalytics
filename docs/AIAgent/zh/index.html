@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Microsoft Agent Framework — 课程</title>
+    <link rel="stylesheet" href="assets/style.css" />
+  </head>
+  <body>
+    <div class="landing">
+      <div
+        style="
+          display: flex;
+          justify-content: flex-end;
+          gap: 6px;
+          font-size: 14px;
+          margin-bottom: 8px;
+        "
+      >
+        <a href="../index.html" style="color: var(--text-faint)">English</a>
+        <span style="color: var(--text-faint)">·</span>
+        <strong>简体中文</strong>
+      </div>
+      <p class="lesson-eyebrow">实战课程 · 20 课 · Claudalytics Copilot</p>
+      <h1>在动手构建中学习 Microsoft Agent Framework</h1>
+      <p class="lede">
+        你将从零构建一个真实的后端 .NET 智能体服务——但你不会照搬一份已完成的
+        构建顺序。你将亲历它的演进：先写出朴素的版本，撞上它的瓶颈，再重构成
+        真正的版本。其中有几件产物是被刻意丢弃的。这正是重点所在。
+      </p>
+
+      <div class="callout callout--verify" style="margin-top: 28px">
+        <span class="callout-label">⚡ 验证仪式</span>
+        <p>
+          每一课都用
+          <code>dotnet run -- --environment Testing</code> 启动。那个
+          <code>--</code> 分隔符至关重要——没有它，dotnet 会停留在
+          Production（昂贵的模型、没有调试日志）。整个课程的第一道关卡：证明控制台
+          打印出 <code>Hosting environment: Testing</code>。
+        </p>
+      </div>
+
+      <div id="modules"></div>
+
+      <hr />
+      <p style="color: var(--text-faint); font-size: 14px">
+        读者对象：熟悉 ASP.NET minimal API 和基础 SQL 的 .NET
+        开发者。不假设你有任何智能体（agent）或 LLM
+        框架的经验。成本控制是结构性的——模块 B 运行起来零成本，且每一个 LLM
+        关卡都跑在固定使用 Haiku 的 Testing 环境上。
+      </p>
+    </div>
+
+    <script src="assets/manifest.js"></script>
+    <script>
+      (function () {
+        var C = window.CURRICULUM;
+        var costClass = function (c) {
+          return c === "none" ? "badge--cost free" : "badge--cost";
+        };
+        var stars = function (d) {
+          return "★★★★★".slice(0, d);
+        };
+        var host = document.getElementById("modules");
+        var html = "";
+        C.modules.forEach(function (mod) {
+          var lessons = C.lessons.filter(function (l) {
+            return l.module === mod.id;
+          });
+          if (!lessons.length) return;
+          html += '<div class="module-block"><h2>' + mod.name + "</h2>";
+          html += '<p class="module-desc">' + mod.desc + "</p>";
+          html += '<div class="card-grid">';
+          lessons.forEach(function (l) {
+            html +=
+              '<a class="lesson-card" href="' +
+              l.folder +
+              '/index.html">' +
+              '<div class="lc-code">' +
+              l.code +
+              " · lesson" +
+              l.n +
+              "</div>" +
+              '<div class="lc-title">' +
+              l.title +
+              "</div>" +
+              '<div class="lc-meta">' +
+              '<span class="badge badge--diff">' +
+              stars(l.diff) +
+              "</span>" +
+              '<span class="badge ' +
+              costClass(l.cost) +
+              '">' +
+              (l.cost === "none" ? "无需 LLM" : l.cost) +
+              "</span>" +
+              "</div></a>";
+          });
+          html += "</div></div>";
+        });
+        host.innerHTML = html;
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,607 @@
+<!doctype html>
+<!-- lesson03/index.html — A3 · Streaming answers (SSE) -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>A3 · Streaming answers (SSE) — MAF Curriculum</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="03">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">Curriculum</a> / Module A / A3
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">
+              Lesson 03 · A3 · Module A — Hello agent
+            </p>
+            <h1>Streaming answers (SSE)</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★</span>
+              <span class="badge badge--cost">Haiku</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>What you'll learn</h2>
+          <p>
+            When a Claudalytics Copilot user asks "What projects do I have?",
+            the agent may run a ClickHouse query and then write a long answer.
+            Today the user waits with a spinner for the whole turn, then sees
+            the full text appear at once — even when the first words were ready
+            seconds earlier. <strong>Streaming</strong> removes that wait by
+            running the agent with <code>RunStreamingAsync</code> and sending
+            each token to the client the moment the model produces it, over a
+            <strong>Server-Sent Events (SSE)</strong> connection.
+          </p>
+          <p>
+            This lesson adds a <code>/chat/stream</code> endpoint. It maps four
+            kinds of streaming update to four named SSE event types:
+            <code>session</code>, <code>token</code>, <code>tool_call</code>,
+            and <code>done</code>. You will learn why each event type exists,
+            how to tell them apart in code, and the two mistakes that break SSE
+            without throwing any exception. Approval handling
+            (<code>approval_request</code>) is added later in
+            <a href="../lesson10/index.html">C3/lesson10</a>. A3's stream is
+            approval-free.
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 Teach</span>
+            <h3>The streaming run and the update stream</h3>
+            <p>
+              MAF's <code>AIAgent</code> exposes two run methods. You already
+              know the blocking one from
+              <a href="../lesson01/index.html">A1</a>:
+            </p>
+            <ul>
+              <li>
+                <code>RunAsync(message, session)</code> — awaits the full turn,
+                returns an <code>AgentResponse</code>.
+              </li>
+              <li>
+                <code>RunStreamingAsync(message, session)</code> — returns an
+                <code>IAsyncEnumerable&lt;StreamingChatMessageUpdate&gt;</code>.
+                Each item in the sequence is one partial update emitted as soon
+                as the model produces it.
+              </li>
+            </ul>
+            <p>
+              A <code>StreamingChatMessageUpdate</code> carries two things you
+              care about:
+            </p>
+            <ul>
+              <li>
+                <code>update.Text</code> — a non-empty string when the model
+                emitted text tokens in this update. This is the partial word or
+                phrase you forward immediately.
+              </li>
+              <li>
+                <code>update.Contents</code> — a list of typed content items.
+                The one that matters here is <code>FunctionCallContent</code> (a
+                tool the model chose to call). A second content type,
+                <code>ToolApprovalRequestContent</code>, is introduced later in
+                <a href="../lesson10/index.html">C3/lesson10</a> for tools that
+                need human sign-off before execution; A3 does not handle it.
+              </li>
+            </ul>
+            <p>
+              The SSE wire format is small. Each event is two lines followed by
+              a blank line.
+            </p>
+            <div class="codewrap">
+              <pre class="code-block"><code>event: token
+data: {"text":"Hello, "}
+
+event: token
+data: {"text":"world!"}
+
+event: done
+data: {}
+</code></pre>
+            </div>
+            <p>
+              The client reads each <code>event:</code>/<code>data:</code> pair
+              and reacts right away. It does not wait for the rest. The most
+              important detail is the <strong>flush</strong> after every write.
+              ASP.NET buffers the response body by default. Without an explicit
+              <code>FlushAsync</code>, the "stream" becomes one slow response
+              that arrives all at once.
+            </p>
+          </div>
+
+          <h2>The four SSE event types</h2>
+          <p>
+            The app uses exactly four event names on
+            <code>/chat/stream</code>. Once you know what triggers each one, the
+            checks inside the update loop are easy to read.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>Event</th>
+                <th>When</th>
+                <th>Key payload field</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>session</code></td>
+                <td>
+                  Once, before the stream starts — carries the session id the
+                  client should echo on follow-ups.
+                </td>
+                <td><code>sessionId</code></td>
+              </tr>
+              <tr>
+                <td><code>token</code></td>
+                <td>
+                  For each update where <code>update.Text</code> is non-empty.
+                </td>
+                <td><code>text</code></td>
+              </tr>
+              <tr>
+                <td><code>tool_call</code></td>
+                <td>
+                  For each <code>FunctionCallContent</code> in
+                  <code>update.Contents</code>.
+                </td>
+                <td><code>name</code>, <code>arguments</code></td>
+              </tr>
+              <tr>
+                <td><code>done</code></td>
+                <td>
+                  Once, after the <code>await foreach</code> completes normally.
+                </td>
+                <td>(empty object)</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            An <code>error</code> event is emitted in the catch block instead of
+            <code>done</code>
+            when the run throws.
+          </p>
+
+          <h2>Build it</h2>
+          <ol class="steps">
+            <li>
+              <h3>Add the SseEvent helper</h3>
+              <p>
+                Every SSE write does the same two things. It serializes the
+                payload as JSON, then flushes the response body so the bytes
+                leave the server now. The streaming loop in step 3 calls this
+                helper many times, so put it in one place. Add it as a
+                file-scope static class at the bottom of
+                <code>Program.cs</code>, after <code>app.Run();</code>, next to
+                the other file-level helpers.
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 Note</span>
+                <p>
+                  <strong>Required using (not in implicit usings):</strong> Add
+                  <code>using System.Text.Json;</code> at the top of
+                  <code>Program.cs</code>. <code>JsonSerializer</code> lives in
+                  this namespace and is not covered by the default ASP.NET
+                  implicit-usings set.
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs</span>
+                </div>
+                <pre class="code-block"><code>internal static class SseEvent
+{
+    private static readonly JsonSerializerOptions JsonOptions =
+        new(JsonSerializerDefaults.Web);
+
+    public static async Task WriteAsync(
+        HttpResponse response, string eventName, object data, CancellationToken ct)
+    {
+        await response.WriteAsync(
+            $"event: {eventName}\ndata: {JsonSerializer.Serialize(data, JsonOptions)}\n\n", ct);
+        await response.Body.FlushAsync(ct);
+    }
+}</code></pre>
+              </div>
+              <p>
+                The double newline (<code>\n\n</code>) after <code>data:</code>
+                is the SSE record separator. It tells the browser's
+                <code>EventSource</code> that this event is complete. If you
+                omit it, the client stalls until the connection closes. The
+                <code>FlushAsync</code> pushes the bytes through ASP.NET's
+                response buffer. Without it, tokens queue in memory and the
+                client receives them all at once when the run finishes. That is
+                a normal response, not a stream.
+              </p>
+            </li>
+
+            <li>
+              <h3>Wire up the session before the stream opens</h3>
+              <p>
+                The <code>/chat/stream</code> endpoint reads the request body,
+                then resolves or creates a session with the
+                <code>GetOrCreateSessionAsync</code> helper from
+                <a href="../lesson02/index.html">A2</a>. It sets the SSE
+                response headers and sends a <code>session</code> event first.
+                The client reads that <code>sessionId</code> and stores it. It
+                sends the id back on the next message so the agent keeps the
+                same multi-turn memory.
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 Note</span>
+                <p>
+                  <strong
+                    >Steps 2 and 3 are one <code>MapPost</code> handler split
+                    across two code snippets.</strong
+                  >
+                  Step 2 opens the lambda and step 3 finishes it. The closing
+                  <code>});</code> appears at the end of step 3. Paste both
+                  snippets consecutively in <code>Program.cs</code> — between
+                  the other <code>app.Map…</code> calls (after
+                  <code>var app = builder.Build();</code> and before
+                  <code>app.Run();</code>) — to form one complete
+                  <code>app.MapPost("/chat/stream", …);</code> call.
+                </p>
+                <p>
+                  <strong
+                    >Required usings (add at the top of
+                    <code>Program.cs</code> if not already present):</strong
+                  >
+                </p>
+                <ul>
+                  <li>
+                    <code>using Microsoft.Extensions.AI;</code> — required for
+                    <code>FunctionCallContent</code>, the typed content item
+                    inspected inside the streaming loop. This namespace is not
+                    in the default implicit-usings set.
+                  </li>
+                </ul>
+                <p>
+                  <strong
+                    >Assumed prior symbols (carry forward from A1/A2):</strong
+                  >
+                  <code>ChatRequest</code>, <code>AgentSession</code>,
+                  <code>GetOrCreateSessionAsync</code>. All three must already
+                  exist in <code>Program.cs</code> from lessons A1 and A2.
+                  (<code>PendingApproval</code> and
+                  <code>StoreApproval</code> are introduced later in
+                  <a href="../lesson10/index.html">C3/lesson10</a> — they are
+                  not needed here.)
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/chat/stream", async (HttpContext context, AIAgent agent,
+    ConcurrentDictionary&lt;string, AgentSession&gt; sessions, CancellationToken ct) =&gt;
+{
+    var request = await context.Request.ReadFromJsonAsync&lt;ChatRequest&gt;(ct);
+    if (request is null || string.IsNullOrWhiteSpace(request.Message))
+    {
+        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+        return;
+    }
+
+    var (sessionId, session) =
+        await GetOrCreateSessionAsync(request.SessionId, agent, sessions, ct);
+
+    context.Response.Headers.ContentType = "text/event-stream";
+    context.Response.Headers.CacheControl = "no-cache";
+    await SseEvent.WriteAsync(context.Response, "session", new { sessionId }, ct);</code></pre>
+              </div>
+              <p>
+                Setting <code>Content-Type: text/event-stream</code> and
+                <code>Cache-Control: no-cache</code> are both required by the
+                SSE spec. Without the content-type header, proxies and load
+                balancers may buffer the entire response.
+              </p>
+            </li>
+
+            <li>
+              <h3>Drive the streaming loop</h3>
+              <p>
+                Now drive the stream. Call <code>RunStreamingAsync</code> and
+                read each update with <code>await foreach</code>. Inside the
+                loop, check <code>update.Contents</code> for typed content items
+                first, then check <code>update.Text</code> for token text. Send
+                the matching SSE event for each one. After the loop ends
+                normally, send <code>done</code>. If the run throws, send
+                <code>error</code> instead. The client uses <code>done</code> to
+                know the turn is finished and stop listening.
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 Note</span>
+                <p>
+                  <strong
+                    >This snippet continues and closes the
+                    <code>app.MapPost</code> lambda opened in step 2.</strong
+                  >
+                  The final <code>});</code> closes both the lambda body and the
+                  <code>MapPost</code> call — do not add a second one.
+                </p>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs</span>
+                </div>
+                <pre class="code-block"><code>    try
+    {
+        await foreach (var update in
+            agent.RunStreamingAsync(request.Message, session, cancellationToken: ct))
+        {
+            foreach (var content in update.Contents)
+            {
+                if (content is FunctionCallContent call)
+                {
+                    await SseEvent.WriteAsync(context.Response, "tool_call",
+                        new { name = call.Name, arguments = call.Arguments }, ct);
+                }
+            }
+
+            if (!string.IsNullOrEmpty(update.Text))
+                await SseEvent.WriteAsync(context.Response, "token",
+                    new { text = update.Text }, ct);
+        }
+
+        await SseEvent.WriteAsync(context.Response, "done", new { }, ct);
+    }
+    catch (Exception ex)
+    {
+        await SseEvent.WriteAsync(context.Response, "error",
+            new { message = ex.Message }, ct);
+    }
+});</code></pre>
+              </div>
+              <p>
+                Why check <code>Contents</code> before <code>Text</code>? A
+                single update can carry both. The model can emit a tool call and
+                some text in the same chunk. The contents loop handles the
+                structured tool call. The text check then runs after it. Both
+                can send an event for the same update, and that is correct.
+              </p>
+            </li>
+
+            <li>
+              <h3>Why the session event goes before the try block</h3>
+              <p>
+                The <code>session</code> event is written <em>before</em> the
+                <code>try</code> block, not inside it. The client needs the
+                session id even if the run fails right away. Suppose the
+                <code>session</code> write were inside the try and the agent
+                threw on the first token. The client would then get only an
+                <code>error</code> event with no id. It could not retry the turn
+                in the same session. Writing <code>session</code> first makes
+                sure the id always reaches the client.
+              </p>
+            </li>
+          </ol>
+
+          <h2>How the update stream maps to the agent's tool loop</h2>
+          <p>
+            The timing of the events explains what you see in the terminal. One
+            full agent turn with a tool call produces updates in about this
+            order:
+          </p>
+          <ol>
+            <li>
+              Zero or more <code>token</code> events — the model's "thinking
+              aloud" text before it decides to call a tool (some models emit
+              this, some do not).
+            </li>
+            <li>
+              A <code>tool_call</code> event — the model committed to calling a
+              function.
+            </li>
+            <li>
+              Silence — MAF executes the tool locally; no updates flow during
+              execution.
+            </li>
+            <li>
+              More <code>token</code> events — the model's answer after seeing
+              the tool result.
+            </li>
+            <li><code>done</code>.</li>
+          </ol>
+          <p>
+            If the agent calls multiple tools (e.g. schema lookup then a SQL
+            query), the
+            <code>tool_call</code> / silence pattern repeats before the final
+            answer tokens arrive. The <code>done</code> event is always last and
+            is emitted exactly once.
+          </p>
+
+          <h2>Verify</h2>
+          <div class="gate">
+            <p class="gate-title">✅ Gate — do not advance until green</p>
+
+            <p>
+              <strong
+                >Start with Testing environment (mandatory ritual from
+                A1):</strong
+              >
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>dotnet run -- --environment Testing</code></pre>
+            </div>
+            <p>Console must print <code>Hosting environment: Testing</code>.</p>
+
+            <p>
+              <strong
+                >Send a streaming request with curl — watch tokens arrive
+                incrementally:</strong
+              >
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -N -X POST http://localhost:8124/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What projects do I have?"}'</code></pre>
+            </div>
+
+            <p>
+              The <code>-N</code> flag disables curl's own output buffering so
+              you see each SSE event as it arrives. Expected output shape (exact
+              text will differ):
+            </p>
+            <div class="codewrap">
+              <pre class="code-block"><code>event: session
+data: {"sessionId":"a3f1..."}
+
+event: tool_call
+data: {"name":"list_projects","arguments":{}}
+
+event: token
+data: {"text":"You have "}
+
+event: token
+data: {"text":"three projects: "}
+
+event: token
+data: {"text":"claudalytics, ..."}
+
+event: done
+data: {}</code></pre>
+            </div>
+
+            <p><strong>Green checks:</strong></p>
+            <ul>
+              <li>
+                The <code>session</code> event arrives first, before any
+                <code>token</code>.
+              </li>
+              <li>
+                At least one <code>tool_call</code> event appears (the agent
+                called <code>list_projects</code> or equivalent).
+              </li>
+              <li>
+                Multiple <code>token</code> events arrive, each with a small
+                text fragment — not one giant blob.
+              </li>
+              <li>
+                The stream ends with <code>done</code>, not just a closed
+                connection.
+              </li>
+            </ul>
+
+            <p><strong>Negative test — detecting buffering:</strong></p>
+            <p>
+              If you see only one <code>token</code> event containing the entire
+              answer followed immediately by <code>done</code>, the response is
+              being buffered. Check two things:
+            </p>
+            <ol>
+              <li>
+                Is <code>FlushAsync</code> called after every
+                <code>WriteAsync</code> in <code>SseEvent</code>? If it is
+                missing, tokens queue in ASP.NET's buffer and are released all
+                at once when the connection closes.
+              </li>
+              <li>
+                Is there a reverse proxy (nginx, YARP, Kestrel behind IIS)
+                between your curl and the app? Proxies often buffer SSE unless
+                configured with
+                <code>proxy_buffering off</code> or equivalent.
+              </li>
+            </ol>
+
+            <p><strong>Follow-up with the session id from step 1:</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -N -X POST http://localhost:8124/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Which of those is most expensive?", "sessionId": "a3f1..."}'</code></pre>
+            </div>
+            <p>
+              The answer should reference the projects from the first turn. The
+              same multi-turn memory from
+              <a href="../lesson02/index.html">A2</a> works here because
+              <code>RunStreamingAsync</code> takes the same
+              <code>AgentSession</code> parameter as <code>RunAsync</code>.
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ Pitfalls</span>
+            <ul>
+              <li>
+                <strong>One giant token blob, then done</strong> → missing
+                <code>FlushAsync</code> in <code>SseEvent.WriteAsync</code>.
+                ASP.NET buffers the response body; without an explicit flush
+                after every write, all events are held in memory and sent
+                together when the run finishes. Add
+                <code>await response.Body.FlushAsync(ct)</code> after
+                <code>WriteAsync</code>.
+              </li>
+              <li>
+                <strong>Client hangs after the last token, never closes</strong>
+                → the <code>done</code> event was never emitted. This happens
+                when the <code>done</code> write is inside the
+                <code>try</code> but after a statement that threw, bypassing it.
+                The <code>done</code> write must be the last statement in the
+                <code>try</code> block, and the <code>catch</code> must emit
+                <code>error</code> instead. Browsers implementing
+                <code>EventSource</code> will reconnect indefinitely on a
+                missing <code>done</code>.
+              </li>
+              <li>
+                <strong
+                  >No tool_call events, but the answer mentions tool
+                  results</strong
+                >
+                → the tool was called via <code>RunAsync</code> (the
+                non-streaming path) somewhere higher up, or the endpoint is
+                silently routing to a non-streaming handler. Confirm the request
+                is hitting <code>/chat/stream</code> and not <code>/chat</code>.
+              </li>
+              <li>
+                <strong>Session id not received by the client</strong> → the
+                <code>session</code> event is inside the <code>try</code> block
+                after the streaming call began, so an early error discards it.
+                Move the <code>session</code> write to before the
+                <code>try</code> block — it must be the very first write after
+                the headers are set.
+              </li>
+              <li>
+                <strong>Proxy / load balancer buffers the stream</strong> → set
+                <code>Content-Type: text/event-stream</code> and
+                <code>Cache-Control: no-cache</code> on the response before the
+                first write. Most proxies respect these headers to disable
+                buffering. In nginx add <code>proxy_buffering off;</code> for
+                SSE routes.
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              Mark lesson complete
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

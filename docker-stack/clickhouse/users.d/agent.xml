@@ -1,0 +1,25 @@
+<clickhouse>
+    <profiles>
+        <readonly_agent>
+            <readonly>2</readonly>
+            <allow_ddl>0</allow_ddl>
+            <max_execution_time>30</max_execution_time>
+            <max_rows_to_read>50000000</max_rows_to_read>
+            <max_result_rows>10000</max_result_rows>
+            <result_overflow_mode>break</result_overflow_mode>
+        </readonly_agent>
+    </profiles>
+    <users>
+        <agent_ro>
+            <password></password>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>readonly_agent</profile>
+            <quota>default</quota>
+            <allow_databases>
+                <database>claudalytics</database>
+            </allow_databases>
+        </agent_ro>
+    </users>
+</clickhouse>

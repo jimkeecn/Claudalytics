@@ -1,0 +1,681 @@
+<!doctype html>
+<!-- lesson01/index.html — A1: Your first agent + a function tool -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>A1 · Your first agent + a function tool — MAF Curriculum</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="01">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">Curriculum</a> / Module A / A1
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">
+              Lesson 01 · A1 · Module A — Hello agent
+            </p>
+            <h1>Your first agent + a function tool</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★</span>
+              <span class="badge badge--cost">Haiku</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>What you'll learn</h2>
+          <p>
+            Ask a raw LLM "what tables are in my telemetry?" and it will make up
+            column names with full confidence, because it has never seen your
+            ClickHouse schema. The fix is an agent: an LLM wired into a
+            tool-call loop, where you hand it one real C# method that returns
+            the true schema and let it call that method before it answers.
+          </p>
+          <p>
+            In the Microsoft Agent Framework you give the agent a name, a system
+            instruction, a model, and a list of callable functions. MAF then
+            handles the back-and-forth between the model and your code until the
+            model stops asking for tool results. This lesson uses three API
+            surfaces to do that —
+            <code>ChatClientAgentOptions</code>,
+            <code>AIFunctionFactory.Create</code>, and
+            <code>client.AsAIAgent</code>. It also sets up the Testing
+            environment launch step that every later lesson uses as a gate
+            check.
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 Teach</span>
+            <p>
+              <strong>Mental model:</strong> an agent is an LLM in a tool-call
+              loop with configurable memory. Three MAF API surfaces do the
+              wiring:
+            </p>
+            <ul>
+              <li>
+                <strong><code>ChatClientAgentOptions</code></strong> — holds the
+                name, description, <code>ChatOptions.Instructions</code> (the
+                system prompt), <code>ChatOptions.ModelId</code>, and the
+                <code>Tools</code> list. Every option lives in one object. The
+                agent's identity and its tools are declared together.
+              </li>
+              <li>
+                <strong><code>AIFunctionFactory.Create(method)</code></strong> —
+                turns an ordinary C# instance method into a tool the model can
+                call. The <code>[Description("…")]</code> attributes on the
+                method and its parameters become the tool schema the LLM
+                receives. You do not hand-write any schema.
+              </li>
+              <li>
+                <strong
+                  ><code>IAnthropicClient.AsAIAgent(options)</code></strong
+                >
+                — builds the <code>AIAgent</code> from the provider client and
+                the options. In <a href="../lesson03/index.html">A3</a> you will
+                chain
+                <code>.AsBuilder().UseOpenTelemetry(…).Build()</code> here. For
+                now the plain call is enough.
+              </li>
+            </ul>
+            <p>
+              <code>agent.RunAsync(prompt)</code> runs one full tool-call loop
+              and returns an <code>AgentResponse</code>. The
+              <code>.Text</code> property holds the final model reply.
+              <code>.Messages</code> holds the full transcript, including the
+              tool calls the model made on the way.
+            </p>
+          </div>
+
+          <h2>Testing-environment ritual</h2>
+          <p>
+            Boot every gate with
+            <code>dotnet run -- --environment Testing</code> (the
+            <code>--</code> is load-bearing). Full explanation and the negative
+            test live in <a href="../lesson00/index.html">L0</a>.
+          </p>
+
+          <div class="callout callout--build">
+            <span class="callout-label">🔧 Setup — packages</span>
+            <p>
+              Add the MAF packages before writing any code. These are the only
+              two you need for A1; later lessons add Workflows and OTel
+              packages.
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>dotnet add package Microsoft.Agents.AI --version 1.9.0
+dotnet add package Microsoft.Agents.AI.Anthropic --version 1.9.0-preview.260603.1</code></pre>
+            </div>
+            <p>
+              The compaction and chat-reducer APIs used later are marked
+              experimental. Suppress the warnings now so the build stays clean:
+              add
+              <code
+                >&lt;NoWarn&gt;$(NoWarn);MAAI001;MEAI001&lt;/NoWarn&gt;</code
+              >
+              to the <code>&lt;PropertyGroup&gt;</code> in
+              <code>AiAgent.csproj</code>:
+            </p>
+            <div class="codewrap">
+              <div class="code-meta">
+                <span class="filename"
+                  >AiAgent.csproj (PropertyGroup addition)</span
+                >
+              </div>
+              <pre class="code-block"><code>&lt;PropertyGroup&gt;
+  &lt;TargetFramework&gt;net9.0&lt;/TargetFramework&gt;
+  &lt;Nullable&gt;enable&lt;/Nullable&gt;
+  &lt;ImplicitUsings&gt;enable&lt;/ImplicitUsings&gt;
+  &lt;!-- MAAI001/MEAI001: compaction + chat-reducer APIs are marked experimental
+       in MAF 1.9.0 / M.E.AI 10.5 — accepted for this learning build. --&gt;
+  &lt;NoWarn&gt;$(NoWarn);MAAI001;MEAI001&lt;/NoWarn&gt;
+&lt;/PropertyGroup&gt;</code></pre>
+            </div>
+            <p>
+              Also create two config files (both ignored by git for
+              <code>appsettings.Local.json</code>):
+            </p>
+            <div class="codewrap">
+              <div class="code-meta">
+                <span class="filename">appsettings.Testing.json</span>
+              </div>
+              <pre class="code-block"><code>{
+  "Models": {
+    "Light":    "claude-haiku-4-5",
+    "Analyst":  "claude-haiku-4-5",
+    "Reasoning":"claude-haiku-4-5"
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.Agents.AI": "Debug"
+    }
+  }
+}</code></pre>
+            </div>
+            <div class="codewrap">
+              <div class="code-meta">
+                <span class="filename"
+                  >appsettings.Local.json (gitignored — secrets only)</span
+                >
+              </div>
+              <pre class="code-block"><code>{
+  "ANTHROPIC_API_KEY": "sk-ant-..."
+}</code></pre>
+            </div>
+            <p>
+              Add <code>appsettings.Local.json</code> to
+              <code>.gitignore</code>. The key is loaded last and overrides
+              everything — never commit it.
+            </p>
+          </div>
+
+          <h2>Build it</h2>
+          <ol class="steps">
+            <li>
+              <h3>Understand model tiering from the start</h3>
+              <p>
+                If you hard-code <code>"claude-sonnet-4-6"</code> in your agent,
+                every test run bills you at Sonnet rates and you must hunt
+                through code to switch models.
+                <a href="../lesson13/index.html">D3</a>
+                treats hard-coded model ids as an anti-pattern for exactly this
+                reason. So the project reads model names from configuration
+                through one static helper from day one.
+              </p>
+              <p>
+                <code>Agents/ModelTiers.cs</code> is a leaf file with no
+                dependencies. Each method reads one tier name from
+                <code>IConfiguration</code> and falls back to a default if the
+                config key is missing. <code>IConfiguration</code> is available
+                through implicit usings (<code>Microsoft.NET.Sdk.Web</code>), so
+                no extra using directive is needed.
+                <code>AgentFactory</code> (step 4) calls
+                <code>ModelTiers.Analyst(config)</code> to pick the agent's
+                model.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Agents/ModelTiers.cs</span>
+                </div>
+                <pre class="code-block"><code>namespace AiAgent.Agents;
+
+public static class ModelTiers
+{
+    public static string Light(IConfiguration config) => config["Models:Light"] ?? "claude-haiku-4-5";
+
+    public static string Analyst(IConfiguration config) => config["Models:Analyst"] ?? "claude-sonnet-4-6";
+
+    public static string Reasoning(IConfiguration config) => config["Models:Reasoning"] ?? "claude-opus-4-8";
+}</code></pre>
+              </div>
+              <p>
+                The <code>appsettings.Testing.json</code> shown in the Setup
+                callout above pins all three tiers to Haiku. So when you launch
+                with <code>--environment Testing</code>, every gate runs on the
+                cheapest model.
+              </p>
+            </li>
+
+            <li>
+              <h3>Create the system prompt constants</h3>
+              <p>
+                The agent needs two pieces of text: a system prompt that tells
+                it what its job is, and a schema document it can return when
+                asked. Both live in one leaf file so later lessons have a single
+                place to extend.
+              </p>
+              <p>
+                <code>Agents/Instructions.cs</code> has no dependencies on other
+                files in this lesson. It provides
+                <code>Instructions.System</code>, which
+                <code>AgentFactory</code> (step 4) reads as the system prompt,
+                and <code>Instructions.SchemaDoc</code>, which
+                <code>SchemaTools.GetSchema</code> (step 3) returns to the
+                model. Write a skeleton now. The full schema text is filled in
+                later in <a href="../lesson08/index.html">C1</a>, but the
+                constant must exist and be non-empty for A1 to compile.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Agents/Instructions.cs (A1 skeleton)</span
+                  >
+                </div>
+                <pre class="code-block"><code>namespace AiAgent.Agents;
+
+public static class Instructions
+{
+    public const string SchemaDoc = """
+        # ClickHouse schema placeholder
+        Fill in with actual schema in C1 (lesson08).
+        """;
+
+    public const string System = $"""
+        You are the Claudalytics analyst. Answer questions about Claude Code
+        telemetry stored in ClickHouse.
+
+        {SchemaDoc}
+        """;
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Write the function tool</h3>
+              <p>
+                This is the method that fixes the made-up-column-names problem
+                from the intro. When the model needs to know the real schema, it
+                calls this tool and gets the true answer instead of guessing.
+              </p>
+              <p>
+                <code>Tools/SchemaTools.cs</code> holds the single function tool
+                the agent will call in A1. It depends only on
+                <code>Instructions.SchemaDoc</code> (step 2), which is already
+                present. <code>AgentFactory</code> (step 4) registers this
+                method as a tool. ClickHouse queries are added later in
+                <a href="../lesson04/index.html">B1</a>; here you only need the
+                schema reference. A tool is a plain C# instance method with a
+                <code>[Description]</code> attribute. The model reads that
+                description as the tool schema, so make it precise. State what
+                the tool returns and when to use it.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Tools/SchemaTools.cs</span>
+                </div>
+                <pre class="code-block"><code>using System.ComponentModel;
+using AiAgent.Agents;
+
+namespace AiAgent.Tools;
+
+public sealed class SchemaTools
+{
+    [Description("Returns the full ClickHouse schema reference: tables, columns, attribute extraction idioms and example queries.")]
+    public string GetSchema() =&gt; Instructions.SchemaDoc;
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>Wire the Anthropic client and create the agent</h3>
+              <p>
+                This step is where the three leaf files come together into an
+                actual agent. The factory injects <code>SchemaTools</code> (step
+                3), reads the model tier from <code>ModelTiers</code> (step 1),
+                and passes <code>Instructions.System</code> (step 2) as the
+                system prompt. <code>Program.cs</code> (step 5) calls this
+                factory once at startup to build the singleton agent.
+              </p>
+              <p>
+                The factory is trimmed to what A1 needs. It grows in later
+                lessons: compaction in
+                <a href="../lesson15/index.html">E2</a>, context provider in
+                <a href="../lesson14/index.html">E1</a>, OTel middleware in
+                <a href="../lesson03/index.html">A3</a>, and agent-as-tool in
+                <a href="../lesson16/index.html">F1</a>. Edit this file in those
+                lessons; do not regenerate it.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Agents/AgentFactory.cs</span>
+                </div>
+                <pre class="code-block"><code>using AiAgent.Tools;
+using Anthropic;
+using Microsoft.Agents.AI;
+using Microsoft.Extensions.AI;
+
+namespace AiAgent.Agents;
+
+public static class AgentFactory
+{
+    public static AIAgent Create(
+        IConfiguration config,
+        SchemaTools tools,
+        ILoggerFactory loggerFactory)
+    {
+        var apiKey = config["ANTHROPIC_API_KEY"]
+            ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not set.");
+
+        IAnthropicClient client = new AnthropicClient { ApiKey = apiKey };
+
+        var options = new ChatClientAgentOptions
+        {
+            Name = "claudalytics-analyst",
+            Description = "Answers natural-language questions over Claudalytics telemetry in ClickHouse.",
+            ChatOptions = new ChatOptions
+            {
+                ModelId = ModelTiers.Analyst(config),
+                Instructions = Instructions.System,
+                Tools =
+                [
+                    AIFunctionFactory.Create(tools.GetSchema),
+                ],
+            },
+        };
+
+        return client.AsAIAgent(options, loggerFactory: loggerFactory);
+    }
+}</code></pre>
+              </div>
+              <p>
+                All three leaf files are now in place — the project builds
+                cleanly after pasting this step.
+              </p>
+            </li>
+
+            <li>
+              <h3>Register the agent and expose a /chat endpoint</h3>
+              <p>
+                The factory and tool from the previous steps are useless until
+                something runs them. <code>Program.cs</code> registers the
+                <code>AIAgent</code> as a singleton and maps a POST endpoint
+                that callers hit to ask questions. For A1 the endpoint stays
+                minimal: no session store yet (that is
+                <a href="../lesson02/index.html">A2</a>), and no streaming (that
+                is <a href="../lesson03/index.html">A3</a>).
+              </p>
+              <p>
+                First, the usings and the DI registrations. These go at the top
+                of <code>Program.cs</code> and just before
+                <code>var app = builder.Build();</code>. The
+                <code>AddSingleton&lt;AIAgent&gt;</code> call asks DI for
+                <code>SchemaTools</code> and passes it to
+                <code>AgentFactory.Create</code> (step 4), so the agent is built
+                once and reused for every request. The
+                <code>Microsoft.Extensions.AI</code> using is needed for
+                <code>FunctionCallContent</code>, which the endpoint reads in
+                the next chunk.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs (usings + DI — before builder.Build())</span
+                  >
+                </div>
+                <pre class="code-block"><code>using AiAgent.Agents;
+using AiAgent.Tools;
+using Microsoft.Agents.AI;
+using Microsoft.Extensions.AI;
+
+builder.Services.AddSingleton&lt;SchemaTools&gt;();
+builder.Services.AddSingleton&lt;AIAgent&gt;(sp =&gt; AgentFactory.Create(
+    sp.GetRequiredService&lt;IConfiguration&gt;(),
+    sp.GetRequiredService&lt;SchemaTools&gt;(),
+    sp.GetRequiredService&lt;ILoggerFactory&gt;()));
+
+var app = builder.Build();</code></pre>
+              </div>
+              <p>
+                Next, the endpoint. It goes after
+                <code>var app = builder.Build();</code>. It calls
+                <code>agent.RunAsync</code> to run one tool-call loop, then
+                returns two fields. <code>answer</code> is the model's final
+                text. <code>toolCalls</code> is the list of tools the model
+                actually called, pulled out of the transcript by filtering
+                <code>response.Messages</code> for
+                <code>FunctionCallContent</code>. The next step adds the health
+                endpoints alongside this one.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs (/chat — after builder.Build())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/chat", async (ChatRequest request, AIAgent agent, CancellationToken ct) =&gt;
+{
+    if (string.IsNullOrWhiteSpace(request.Message))
+        return Results.BadRequest(new { error = "message is required" });
+
+    var response = await agent.RunAsync(request.Message, cancellationToken: ct);
+    return Results.Ok(new
+    {
+        answer = response.Text,
+        toolCalls = response.Messages
+            .SelectMany(m =&gt; m.Contents)
+            .OfType&lt;FunctionCallContent&gt;()
+            .Select(c =&gt; new { name = c.Name }),
+    });
+});
+
+app.Run();</code></pre>
+              </div>
+              <p>
+                Last, the request type. <code>ChatRequest</code> is a file-scope
+                record, so it goes at the very bottom of the file, after
+                <code>app.Run();</code>.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs (record — after app.Run())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>internal sealed record ChatRequest(string Message);</code></pre>
+              </div>
+              <p>
+                The <code>/chat</code> endpoint is now live. The
+                <code>toolCalls</code> field is the A1 verification signal. A
+                confident answer with an empty <code>toolCalls</code> list means
+                the tool was not registered, or its description was too vague
+                for the model to choose it. You will check this in the Verify
+                gate.
+              </p>
+            </li>
+
+            <li>
+              <h3>Add a smoke-test health endpoint</h3>
+              <p>
+                Before you trust the <code>/chat</code> answers, you want a
+                cheap way to confirm the model is reachable and the API key is
+                valid. <code>/healthz/llm</code> sends one tiny prompt and
+                returns the reply, so a failure here points at wiring, not at
+                your prompt. The Verify gate below calls this endpoint first.
+              </p>
+              <p>
+                These two endpoints go in <code>Program.cs</code> after
+                <code>var app = builder.Build();</code>, next to
+                <code>/chat</code> from step 5. <code>/healthz</code> is a plain
+                liveness check; <code>/healthz/llm</code> is the LLM smoke test.
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs (healthz — after builder.Build())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapGet("/healthz", () =&gt; Results.Ok(new { status = "ok" }));
+
+app.MapGet("/healthz/llm", async (AIAgent agent, CancellationToken ct) =&gt;
+{
+    var response = await agent.RunAsync("Reply with the single word: ok", cancellationToken: ct);
+    return Results.Ok(new { status = "ok", model_reply = response.Text });
+});</code></pre>
+              </div>
+            </li>
+          </ol>
+
+          <h2>Why tool descriptions matter</h2>
+          <p>
+            The model cannot read your code. It sees only the tool name and the
+            description you wrote. When the description is thin, the model
+            guesses, and it usually guesses wrong. The fix is always the same.
+            Make the description say <em>exactly</em> when to use the tool and
+            what it returns, not just what it is called.
+          </p>
+          <p>
+            Compare what the model sees for <code>GetSchema</code> with a
+            precise vs a vague description:
+          </p>
+          <ul>
+            <li>
+              <strong>Precise:</strong>
+              <em
+                >"Returns the full ClickHouse schema reference: tables, columns,
+                attribute extraction idioms and example queries."</em
+              >
+              — the model knows to call this whenever it needs to write or
+              validate a query.
+            </li>
+            <li>
+              <strong>Vague:</strong> <em>"Gets schema info."</em> — the model
+              cannot tell whether this is relevant for query-writing, so it
+              skips the tool and answers from its own (nonexistent) knowledge of
+              your data, producing hallucinated column names.
+            </li>
+          </ul>
+          <p>
+            A single tool with a precise description is more reliable than
+            multiple tools with overlapping or thin descriptions. Add tools only
+            when they are distinct in purpose — and make each description say
+            both when to use it <em>and</em> what it returns.
+          </p>
+
+          <h2>Verify</h2>
+          <div class="gate">
+            <p class="gate-title">✅ Gate — do not advance until green</p>
+
+            <p>
+              <strong>Step 1 — environment check.</strong> Launch with the
+              ritual:
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>dotnet run -- --environment Testing</code></pre>
+            </div>
+            <p>
+              Confirm the console prints
+              <code>Hosting environment: Testing</code>. If it says anything
+              else, stop and fix the launch command.
+            </p>
+
+            <p><strong>Step 2 — smoke test the LLM path:</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl http://localhost:8124/healthz/llm</code></pre>
+            </div>
+            <p>Expected: <code>{"status":"ok","model_reply":"ok"}</code></p>
+
+            <p>
+              <strong
+                >Step 3 — ask a question that requires
+                <code>GetSchema</code>:</strong
+              >
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "what tables are available in the schema?"}'</code></pre>
+            </div>
+            <p>
+              The response <code>toolCalls</code> array must be
+              <strong>non-empty</strong> and contain <code>get_schema</code>.
+              The <code>answer</code> must describe the schema contents, not
+              generic placeholders.
+            </p>
+
+            <p><strong>Negative test — the hallucination check.</strong></p>
+            <p>
+              If you get a confident answer but <code>toolCalls</code> is empty,
+              the model answered from its own "knowledge" (it has none about
+              your schema). This means the tool is not registered or its
+              description is too vague. Check that
+              <code>AIFunctionFactory.Create(tools.GetSchema)</code> appears in
+              the <code>Tools</code> array in your options, and that the method
+              carries a <code>[Description]</code> attribute.
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ Pitfalls</span>
+            <ul>
+              <li>
+                <strong
+                  >Console shows
+                  <code>Hosting environment: Production</code></strong
+                >
+                → Missing <code>--</code> separator. Run
+                <code>dotnet run -- --environment Testing</code>, not
+                <code>dotnet run --environment Testing</code>. Without the
+                separator, dotnet treats <code>--environment</code> as its own
+                flag and silently discards it.
+              </li>
+              <li>
+                <strong>Non-empty answer, empty <code>toolCalls</code></strong>
+                → Tool not registered. The method must appear in
+                <code>ChatOptions.Tools</code> via
+                <code>AIFunctionFactory.Create</code>. Check the array in
+                <code>AgentFactory.cs</code>; a missing entry produces no
+                compile error and no runtime warning — just a hallucinating
+                model.
+              </li>
+              <li>
+                <strong
+                  >Model skips the tool and answers from its own
+                  knowledge</strong
+                >
+                → Vague <code>[Description]</code> attribute. The model cannot
+                tell when the tool is relevant, so it guesses without calling
+                it. Rewrite the description to say exactly what the tool returns
+                and when to use it.
+              </li>
+              <li>
+                <strong
+                  ><code>ANTHROPIC_API_KEY is not set</code> at startup</strong
+                >
+                → The key is missing from
+                <code>appsettings.Local.json</code> (the gitignored file). Never
+                commit the key; the Local file is loaded last and overrides
+                everything.
+              </li>
+              <li>
+                <strong
+                  >Tool method throws instead of returning an error
+                  string</strong
+                >
+                → An unhandled exception from a tool ends the
+                <code>RunAsync</code> call with an exception, not a
+                model-readable message. Always catch and return
+                <code>"QUERY FAILED: {ex.Message}"</code> so the model can
+                reason about the failure.
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              Mark lesson complete
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

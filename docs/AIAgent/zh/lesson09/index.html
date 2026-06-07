@@ -1,0 +1,603 @@
+<!doctype html>
+<!-- lesson09/index.html — C2: Observability: middleware + OTel -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>C2 · 可观测性：中间件 + OTel — MAF 课程</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="09">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">课程</a> / 模块 C / C2
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">第 09 课 · C2 · 模块 C — 打造产品</p>
+            <h1>可观测性：中间件 + OTel</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★</span>
+              <span class="badge badge--cost">Haiku</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>你将学到什么</h2>
+          <p>
+            智能体（agent）自己决定调用哪些 SQL
+            工具、做多少次模型往返。一旦某次运行太贵
+            或调用了你没料到的工具，你却没有任何记录：调了哪些工具、付了多少
+            token、各自耗时多久，全都查不到。<strong
+              >C2 让每次模型往返和每次工具调用事后都可见。</strong
+            >
+            委托式聊天客户端（delegating chat client）把每次往返记进控制台日志，
+            <code>UseOpenTelemetry</code>
+            则把结构化跨度（span）写入智能体已经在查询的同一个 ClickHouse。
+          </p>
+          <p>
+            一共两个切入点（seam），层级不同、看到的东西也不同。第一个是委托式聊天客户端，
+            它包裹模型提供方，看到每次原始往返：进去的消息、回来的工具调用（tool
+            call）和 token 计数。 第二个是构建器上的
+            <code>UseOpenTelemetry</code>，它向任何 OpenTelemetry 后端发出
+            <code>invoke_agent</code> 和
+            <code>execute_tool</code> 跨度。两者都导出到智能体查询的同一个
+            ClickHouse，产品自己监控自己。埋点一次，之后永久可查。
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 讲解</span>
+            <h3>两个中间件（middleware）切入点</h3>
+            <p>
+              <strong>切入点 1 —— DelegatingChatClient。</strong>这是
+              <code>Microsoft.Extensions.AI</code> 的中间件模式：继承
+              <code>DelegatingChatClient</code>，重写
+              <code>GetResponseAsync</code> 和
+              <code>GetStreamingResponseAsync</code>，调用
+              <code>base.*</code>
+              转发给真正的提供方，转发后对结果随意处理。它通过
+              <code>client.AsAIAgent(…)</code> 的
+              <code>clientFactory</code> 参数接入。它在每次模型往返时运行，
+              包括单次
+              <code>RunAsync</code>
+              内部的工具调用循环，所以是按请求日志和成本追踪的理想位置。
+            </p>
+            <p>
+              <strong
+                >切入点 2 —— <code>UseOpenTelemetry(sourceName)</code>。</strong
+              >
+              在 <code>agent.AsBuilder()</code> 返回的
+              <code>AIAgentBuilder</code> 上调用， 它会把一个 OTel
+              <code>ActivitySource</code>
+              接入智能体（agent）。它会自动发出两类跨度：
+              <code>invoke_agent</code>（每次 <code>RunAsync</code> 调用一个）和
+              <code>execute_tool</code>
+              （每次工具调用（tool call）一个）。你给这个源命名 ——
+              这个名字会成为 你 OTel 流水线配置中的
+              <code>AddSource(…)</code> 参数。
+            </p>
+            <h3>命名的 API 接口</h3>
+            <ul>
+              <li>
+                <code>DelegatingChatClient</code> —— 基类，
+                <code>Microsoft.Extensions.AI</code>
+              </li>
+              <li>
+                <code
+                  >client.AsAIAgent(options, clientFactory: inner =&gt; …)</code
+                >
+                —— 接入中间件（middleware）
+              </li>
+              <li>
+                <code
+                  >agent.AsBuilder().UseOpenTelemetry(sourceName).Build()</code
+                >
+                —— 添加 OTel 跨度
+              </li>
+              <li>
+                <code
+                  >builder.Services.AddOpenTelemetry()…AddAspNetCoreInstrumentation()…AddSource(…)…AddOtlpExporter()</code
+                >
+                —— 宿主侧的流水线
+              </li>
+            </ul>
+          </div>
+
+          <h2>两个切入点有何不同</h2>
+          <p>明确一下每个切入点看到什么、何时看到，会很有帮助：</p>
+          <table>
+            <thead>
+              <tr>
+                <th>切入点</th>
+                <th>粒度</th>
+                <th>你能拿到什么</th>
+                <th>接入位置</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>DelegatingChatClient</td>
+                <td>每一次模型 HTTP 调用</td>
+                <td>
+                  原始消息、<code>FunctionCallContent</code>、token 计数、
+                  流式分块
+                </td>
+                <td><code>AsAIAgent</code> 中的 <code>clientFactory</code></td>
+              </tr>
+              <tr>
+                <td>UseOpenTelemetry</td>
+                <td>每次智能体（agent）调用 + 每次工具执行</td>
+                <td>
+                  结构化的 OTel 跨度：<code>invoke_agent</code>、
+                  <code>execute_tool</code>、模型 id 属性
+                </td>
+                <td><code>AsBuilder().UseOpenTelemetry(…).Build()</code></td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            凡是你想写进日志的内容，用委托式客户端 —— 它简单、
+            同步，并且在进程中始终可用。凡是你想查询、聚合或告警的内容，用 OTel
+            —— 它会进入 ClickHouse，与你的 Claudalytics
+            会话（session）数据并存。
+          </p>
+
+          <h2>动手构建</h2>
+          <ol class="steps">
+            <li>
+              <h3>步骤 1 — 编写委托式聊天客户端</h3>
+              <p>
+                创建
+                <code>Middleware/ToolCallLoggingChatClient.cs</code
+                >，这就是切入点 1。 步骤 2
+                把它接入智能体，控制台读它的日志行。它继承
+                <code>DelegatingChatClient</code>，构造函数接收内层客户端和一个
+                <code>ILogger</code>，是标准 .NET DI。
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 准备 — 依赖包</span>
+                <p>
+                  C2 引入 OpenTelemetry。在编写任何代码之前先添加三个包
+                  （版本已在
+                  <code>AiAgent.csproj</code> 中固定）：
+                </p>
+                <div class="codewrap">
+                  <pre
+                    class="code-block"
+                  ><code>dotnet add package OpenTelemetry.Extensions.Hosting --version 1.15.3
+dotnet add package OpenTelemetry.Exporter.OpenTelemetryProtocol --version 1.15.3
+dotnet add package OpenTelemetry.Instrumentation.AspNetCore --version 1.15.2</code></pre>
+                </div>
+              </div>
+
+              <p>
+                先写非流式重写。它调用
+                <code>base.GetResponseAsync</code> 转发请求，
+                然后遍历响应消息，找出每个
+                <code>FunctionCallContent</code> 并记录工具名和参数；
+                <code>response.Usage</code> 非空时再记录 token
+                用量。成本追踪就在这里。 项目开启了 implicit usings，但
+                <code>ILogger</code> 仍需显式
+                <code>using Microsoft.Extensions.Logging;</code>。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Middleware/ToolCallLoggingChatClient.cs — 类 +
+                    非流式重写</span
+                  >
+                </div>
+                <pre class="code-block"><code>using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
+
+namespace AiAgent.Middleware;
+
+public sealed class ToolCallLoggingChatClient(IChatClient innerClient, ILogger logger)
+    : DelegatingChatClient(innerClient)
+{
+    public override async Task&lt;ChatResponse&gt; GetResponseAsync(
+        IEnumerable&lt;ChatMessage&gt; messages, ChatOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        var response = await base.GetResponseAsync(messages, options, cancellationToken);
+
+        foreach (var call in response.Messages
+            .SelectMany(m =&gt; m.Contents)
+            .OfType&lt;FunctionCallContent&gt;())
+            logger.LogInformation("Tool call requested: {Tool} {Args}",
+                call.Name, System.Text.Json.JsonSerializer.Serialize(call.Arguments));
+
+        if (response.Usage is { } usage)
+            logger.LogInformation("Model round-trip: in={Input} out={Output} tokens",
+                usage.InputTokenCount, usage.OutputTokenCount);
+
+        return response;
+    }</code></pre>
+              </div>
+
+              <p>
+                再写流式重写，并闭合类。流式路径走的是另一个方法，所以两个都要重写。
+                它原样 yield 每个
+                <code>ChatResponseUpdate</code
+                >，从不缓冲。日志只是副作用，不改数据流。
+                委托式客户端的契约：保持透明、增加行为、不破坏流。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >ToolCallLoggingChatClient.cs — 流式重写（之后闭合类）</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>    public override async IAsyncEnumerable&lt;ChatResponseUpdate&gt; GetStreamingResponseAsync(
+        IEnumerable&lt;ChatMessage&gt; messages, ChatOptions? options = null,
+        [System.Runtime.CompilerServices.EnumeratorCancellation]
+        CancellationToken cancellationToken = default)
+    {
+        await foreach (var update in base.GetStreamingResponseAsync(
+            messages, options, cancellationToken))
+        {
+            foreach (var call in update.Contents.OfType&lt;FunctionCallContent&gt;())
+                logger.LogInformation("Tool call requested (stream): {Tool}", call.Name);
+            yield return update;
+        }
+    }
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>步骤 2 — 把中间件接入智能体工厂</h3>
+              <p>
+                这一步同时打开两个切入点。在
+                <code>Agents/AgentFactory.cs</code> 中向
+                <code>client.AsAIAgent</code> 传一个
+                <code>clientFactory</code> lambda， 它接收原始
+                <code>IChatClient</code> 并返回包裹它的步骤 1 的
+                <code>ToolCallLoggingChatClient</code> —— 这是切入点
+                1。然后链式调用
+                <code
+                  >.AsBuilder().UseOpenTelemetry(OtelSourceName).Build()</code
+                >
+                添加 OTel 跨度 —— 这是切入点 2。源名是 public 常量，步骤 3 在
+                <code>Program.cs</code> 里读回它。
+              </p>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 说明 — 累积文件</span>
+                <p>
+                  <code>Agents/AgentFactory.cs</code> 在
+                  <a href="../lesson08/index.html">C1</a> 中开始编写。保留 C1
+                  的完整 文件 —— 所有 <code>options</code>/<code>Tools</code>
+                  的接线保持原样不变。在 C2 中你只做两处新增：
+                </p>
+                <ol>
+                  <li>
+                    添加 <code>OtelSourceName</code> 作为 public 常量 （在
+                    Program.cs 中需要）。
+                  </li>
+                  <li>
+                    向 <code>client.AsAIAgent</code> 传入
+                    <code>clientFactory:</code>，并在其结果上链式调用
+                    <code
+                      >.AsBuilder().UseOpenTelemetry(OtelSourceName).Build()</code
+                    >。
+                  </li>
+                </ol>
+                <p>
+                  <code>AgentFactory.cs</code> 顶部需要的 using （六个应该在 C1
+                  中就已经全部存在；补上任何缺失的）：
+                </p>
+                <div class="codewrap">
+                  <pre class="code-block"><code>using AiAgent.Middleware;
+using AiAgent.Tools;
+using Anthropic;
+using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Compaction;
+using Microsoft.Extensions.AI;</code></pre>
+                </div>
+              </div>
+
+              <p>
+                下面只展示 C2 的两处新增。<code>OtelSourceName</code>
+                常量是新的，步骤 3 会读它。 C1 的 <code>options</code> /
+                <code>Tools</code> 接线保持原样。改动仅是给
+                <code>AsAIAgent</code> 加
+                <code>clientFactory:</code>，并在结果上链式调用
+                <code>.AsBuilder().UseOpenTelemetry(...).Build()</code>。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Agents/AgentFactory.cs</span>
+                  <span
+                    style="
+                      margin-left: 1rem;
+                      font-size: 0.8em;
+                      color: var(--text-muted);
+                    "
+                    >节选 —— 仅展示 C2 的两处新增；保留全部 C1 内容</span
+                  >
+                </div>
+                <pre class="code-block"><code>public static class AgentFactory
+{
+    public const string OtelSourceName = "Claudalytics.Agent";
+
+    public static AIAgent Create(
+        IConfiguration config,
+        SchemaTools tools,
+        AnalysisTools analysis,
+        ILoggerFactory loggerFactory)
+    {
+        var apiKey = config["ANTHROPIC_API_KEY"]
+            ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not set.");
+
+        IAnthropicClient client = new AnthropicClient { ApiKey = apiKey };
+
+        // ... ChatClientAgentOptions / Tools wiring unchanged from C1 ...
+
+        var agent = client.AsAIAgent(
+            options,
+            clientFactory: inner =&gt; new ToolCallLoggingChatClient(
+                inner, loggerFactory.CreateLogger&lt;ToolCallLoggingChatClient&gt;()),
+            loggerFactory: loggerFactory);
+
+        return agent.AsBuilder()
+            .UseOpenTelemetry(OtelSourceName)
+            .Build();
+    }
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>步骤 3 — 在 Program.cs 中注册 OTel 流水线</h3>
+              <p>
+                步骤 2 的切入点 2
+                只有在有人监听时才发出跨度。这一步加上这个监听者。在
+                <code>Program.cs</code> 中调用
+                <code>builder.Services.AddOpenTelemetry()</code>
+                并添加四样东西。 流水线末端的收集器把跨度写入
+                ClickHouse，也就是验证关卡要查的那张表。
+              </p>
+              <ul>
+                <li>
+                  一个服务名 —— 它会成为每个跨度上的
+                  <code>service.name</code> 资源属性。
+                </li>
+                <li>
+                  <code>AddAspNetCoreInstrumentation()</code> —— 这是
+                  下方常见坑一节描述的<strong>关键一行</strong>。
+                </li>
+                <li>
+                  为你命名的源以及两个 MAF 默认源调用
+                  <code>AddSource(…)</code>。
+                </li>
+                <li>
+                  <code>AddOtlpExporter()</code> —— 通过
+                  <code>OTEL_EXPORTER_OTLP_ENDPOINT</code>
+                  指向技术栈的 OTel 收集器。
+                </li>
+              </ul>
+              <div class="callout callout--build">
+                <span class="callout-label">🔧 说明 — 放置位置 + using</span>
+                <p>
+                  <strong>文件：</strong> <code>Program.cs</code>。<br />
+                  <strong>放置位置：</strong>把这个代码块放在所有
+                  <code>builder.Services.*</code> 注册之后、
+                  <code>var app = builder.Build();</code> <em>之前</em>。<br />
+                  <strong>using：</strong>在 <code>Program.cs</code> 顶部，
+                  与现有的 using 语句一起加上这两个：
+                </p>
+                <div class="codewrap">
+                  <pre class="code-block"><code>using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;</code></pre>
+                </div>
+              </div>
+
+              <p>
+                三行 <code>AddSource</code> 顺序无所谓。第一行是步骤 2
+                的命名源，承载 <code>UseOpenTelemetry</code> 的跨度；第二行是
+                MAF 默认智能体源；第三行是
+                <code>Microsoft.Extensions.AI</code> 聊天客户端源。
+                <code>AddAspNetCoreInstrumentation()</code> 不可省，缺它会让整张
+                trace 表为空， 常见坑一节会解释原因。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Program.cs</span>
+                  <span
+                    style="
+                      margin-left: 1rem;
+                      font-size: 0.8em;
+                      color: var(--text-muted);
+                    "
+                    >加在所有 builder.Services.* 之后 —— var app =
+                    builder.Build(); 之前</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource =&gt; resource.AddService("claudalytics-agent"))
+    .WithTracing(tracing =&gt; tracing
+        .AddAspNetCoreInstrumentation()
+        .AddSource(AgentFactory.OtelSourceName)
+        .AddSource("Experimental.Microsoft.Agents.AI")
+        .AddSource("Experimental.Microsoft.Extensions.AI")
+        .AddOtlpExporter());</code></pre>
+              </div>
+              <p>
+                <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> 环境变量在
+                <code>docker-compose</code> 中设置，指向技术栈中的 OpenTelemetry
+                Collector 服务。该收集器扇出（fan-out）到 ClickHouse ——
+                也就是智能体（agent）用 SQL 工具（tool）
+                查询的同一张表。如果你通过 <code>docker-compose up</code> 运行，
+                在开发时就不需要手动配置该端点。
+              </p>
+            </li>
+          </ol>
+
+          <h2>为什么吃自家狗粮在这里很重要</h2>
+          <p>
+            智能体（agent）的工作是回答关于 Claudalytics
+            遥测（telemetry）数据的问题。 通过把它自己的跨度导出到同一张
+            <code>otel_traces</code> 表，每一次智能体运行都会添加一行，供你
+            查询：调用了哪些工具（tool）、各自耗时多久、哪个模型
+            处理了哪一轮。你真的可以问智能体"过去一小时你做了多少次工具
+            调用？"，它会查询自己的 trace 数据来回答。这个反馈 闭环值得尽早构建
+            —— 它让 <a href="../lesson10/index.html">C3（工具审批）</a> 这一课的
+            安全叙事变得具体得多，因为你能在 trace 表里看到那些危险的
+            调用，然后再去为它们设关卡（gate）。
+          </p>
+
+          <h2>验证</h2>
+          <div class="gate">
+            <p class="gate-title">&#x2705; 关卡（gate） — 未变绿前不要前进</p>
+
+            <p><strong>以 Testing 模式启动技术栈：</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>dotnet run -- --environment Testing</code></pre>
+            </div>
+
+            <p><strong>发送一轮对话：</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message":"list my projects"}' | jq .</code></pre>
+            </div>
+
+            <p>
+              <strong>检查 1 —— 中间件（middleware）日志行。</strong>在控制台
+              你应该至少看到一行类似这样的输出：
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>info: AiAgent.Middleware.ToolCallLoggingChatClient[0]
+      Tool call requested: list_projects {"":""}
+info: AiAgent.Middleware.ToolCallLoggingChatClient[0]
+      Model round-trip: in=842 out=45 tokens</code></pre>
+            </div>
+
+            <p>
+              <strong>检查 2 —— ClickHouse 中的 OTel 跨度。</strong>等待几
+              秒让收集器刷新后，查询 <code>otel_traces</code>：
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>SELECT ServiceName, SpanName, StatusCode
+FROM otel_traces
+WHERE ServiceName = 'claudalytics-agent'
+  AND Timestamp &gt; now() - INTERVAL 1 MINUTE
+ORDER BY Timestamp DESC
+LIMIT 20;</code></pre>
+            </div>
+            <p>
+              你应该看到若干行，其 <code>SpanName</code> 值包含
+              <code>invoke_agent</code> 和 <code>execute_tool</code>。
+            </p>
+
+            <p>
+              <strong>反向测试 —— 采样器的静默丢弃。</strong>注释 掉
+              <code>.AddAspNetCoreInstrumentation()</code>，重启，发送
+              同一轮对话，等 10 秒，重新运行 ClickHouse 查询。
+              <code>otel_traces</code> 表对该服务返回 <strong>零行</strong> ——
+              即便智能体（agent）确实运行了、 控制台日志也出现了、HTTP 响应也是
+              正确的。智能体在工作而 trace 表却为空，正是 缺少 ASP.NET
+              埋点的确切症状。前进前请 恢复这一行。
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">&#x26A0;&#xFE0F; 常见坑</span>
+            <ul>
+              <li>
+                <strong
+                  >智能体（agent）明明运行了，<code>otel_traces</code>
+                  却为空</strong
+                >
+                → 缺少 <code>AddAspNetCoreInstrumentation()</code>。
+                没有它，ASP.NET 自己的传入请求活动就是根 跨度，而
+                <code>ParentBased</code> 采样器（OTel 默认）
+                会以与父级相同的速率对其采样 —— 对于一个
+                未注册的源来说，这个速率是 0%。每个智能体子跨度都被静默
+                丢弃。没有任何警告；智能体工作正常；表却
+                为空。加上这一行，重启。
+              </li>
+              <li>
+                <strong>日志行出现了，但 ClickHouse 行没出现</strong> →
+                <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> 错误或不可达。 OTLP
+                导出器默认会静默吞掉导出错误。 检查环境中的
+                <code>OTEL_EXPORTER_OTLP_ENDPOINT</code>
+                （在 Docker 内应为
+                <code>http://otel-collector:4317</code>，若在技术栈外
+                运行智能体则为 <code>http://localhost:4317</code>）。你可以 通过
+                <code>OTEL_EXPORTER_OTLP_TRACES_ENDPOINT</code> 和
+                <code>OTEL_DIAGNOSTICS_FILE_DIRECTORY</code> 启用导出器诊断。
+              </li>
+              <li>
+                <strong>跨度存在，但归属到了错误的服务 名</strong>
+                → <code>resource.AddService(…)</code> 未调用，或调用时传了
+                错误的字符串。检查 ClickHouse 中的 <code>ServiceName</code>；
+                它应当是 <code>claudalytics-agent</code>。
+              </li>
+              <li>
+                <strong
+                  >流式（streaming）对话没有产生工具调用（tool
+                  call）日志行</strong
+                >
+                → <code>GetStreamingResponseAsync</code> 重写缺失， 或没有调用
+                <code>yield return update</code>。流式
+                路径走的是与非流式不同的方法 —— 两者都必须重写。
+              </li>
+              <li>
+                <strong>编译时找不到 <code>UseOpenTelemetry</code></strong>
+                → 你直接在 <code>AIAgent</code> 上调用了它，而不是
+                在构建器上。调用链必须是
+                <code
+                  >agent.AsBuilder().UseOpenTelemetry(sourceName).Build()</code
+                >。
+              </li>
+            </ul>
+          </div>
+
+          <h2>接下来是什么</h2>
+          <p>
+            有了 ClickHouse
+            中的每一个智能体（agent）跨度，你现在就拥有了所需的数据， 可以让
+            <a href="../lesson10/index.html">C3</a>
+            中的人工审批（approval）关卡（gate）变得有据可依：你可以 查询哪些
+            SQL 工具调用（tool call）最频繁、识别那些
+            触发大扫描的调用，并用这些证据来决定哪些工具
+            需要人工关卡。你在这里构建的中间件（middleware）直接为
+            那个决策提供输入。
+          </p>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              标记本课完成
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

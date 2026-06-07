@@ -1,0 +1,736 @@
+<!doctype html>
+<!-- lesson04/index.html — B1 ♻ — The graph, no LLM: executors & edges
+     Generated from _TEMPLATE.html. Do NOT hand-write nav/sidebar/prevnext — site.js owns them. -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>B1 · 执行器与边：一条无需 LLM 的扇出流水线 — MAF 课程</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="04">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">课程</a> / 模块 B / B1
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">
+              第 04 课 · B1 · 模块 B — 在引入智能之前，先搭好图
+            </p>
+            <h1>执行器与边：一条无需 LLM 的扇出流水线</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★</span>
+              <span class="badge badge--cost">无需 LLM — 可免费重跑</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>你将学到什么</h2>
+          <p>
+            一次 Claudalytics 调查要跑多个 ClickHouse
+            探针（probe）。如果把这些活儿写成一坨缠在一起的方法，一旦结果出错或卡住，你就分不清是哪个探针出了问题、它们是否真的并行跑了。MAF
+            的工作流（workflow）运行时把工作拆成带类型的节点（node）——称为
+            <em>执行器（executor）</em>——再用
+            <em>边（edge）</em>
+            连接：每个执行器只收一种消息、只做一件事、再发一条消息给下一个节点，于是每一步都有名字、彼此隔离、可单独测试。
+          </p>
+          <p>
+            用这套运行时不需要
+            LLM。本课搭建一个规划器（planner）节点，把三个探针任务并行扇出（fan-out）到三个工作节点，再在一个扇入（fan-in）节点里汇合原始结果。<strong
+              >整个过程不调用任何模型。</strong
+            >
+            这是刻意为之：没有模型，每次运行都免费且确定，调试时可以随便重跑。这里搭的收集器是
+            ♻ 脚手架（scaffolding），会在
+            <a href="../lesson06/index.html">B3</a> 中被一个 LLM
+            综合节点取代。先把管道显式搭出来，再往里放智能的东西。
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 讲解</span>
+            <h3>三个原语</h3>
+            <ul>
+              <li>
+                <strong>Executor&lt;T&gt;</strong> —
+                一个代码节点。继承它，指定输入消息类型 <code>T</code>，实现
+                <code>HandleAsync</code>。在构造函数里给执行器一个唯一的字符串
+                id。一个执行器 = 针对一种消息类型的一个处理器。
+              </li>
+              <li>
+                <strong>输出协议特性（Output protocol attributes）</strong> —
+                执行器 <em>发送</em> 的每一种消息都必须通过类上的
+                <code>[SendsMessage(typeof(M))]</code> 声明；执行器
+                <em>作为最终输出产出</em> 的消息则使用
+                <code>[YieldsOutput(typeof(M))]</code
+                >。发送未声明的类型会在运行时抛出异常，并清楚地指出是哪个执行器、哪种类型。这是契约，不是提示。
+              </li>
+              <li>
+                <strong>边（Edges）</strong> — 你在
+                <code>WorkflowBuilder</code> 上注册它们：
+                <ul>
+                  <li>
+                    <code>AddFanOutEdge</code> — 一个源、N
+                    个目标；一个分区器（partitioner）lambda
+                    把每条消息映射到一个或多个目标索引。
+                  </li>
+                  <li>
+                    <code>AddFanInBarrierEdge</code> — N
+                    个源、一个汇（sink）；只有在每一个上游都投递之后，汇才会触发。这就是你汇合并行工作的方式。
+                  </li>
+                  <li>
+                    <code>AddEdge&lt;T&gt;</code> —
+                    带可选谓词的类型化直连边。消息类型决定路由；谓词可以进一步过滤。
+                  </li>
+                </ul>
+              </li>
+            </ul>
+            <p>
+              本课用到的 MAF API 接口：
+              <code>Executor&lt;T&gt;</code>、<code>[SendsMessage]</code>、
+              <code>[YieldsOutput]</code>、<code>WorkflowBuilder</code>、
+              <code>AddFanOutEdge</code>、<code>AddFanInBarrierEdge</code>、
+              <code>AddEdge&lt;T&gt;</code>、
+              <code>IWorkflowContext.SendMessageAsync</code>、
+              <code>IWorkflowContext.YieldsOutputAsync</code>、
+              <code>builder.WithOutputFrom(...).Build()</code>。
+            </p>
+          </div>
+
+          <h2>本课的图形态</h2>
+          <p>
+            这是调查图的简化版。完整应用还加了一个校验器、一个 HITL
+            端口和一个深入分析分支（在后续课程里讲解）。
+          </p>
+          <div class="codewrap">
+            <pre
+              class="code-block"
+            ><code>                        ┌─&gt; probe-0 ─┐
+  plan ──fan-out────────┼─&gt; probe-1 ─┼──fan-in barrier──&gt; collector ──&gt; output
+                        └─&gt; probe-2 ─┘</code></pre>
+          </div>
+
+          <h2>动手搭建</h2>
+
+          <div class="callout callout--build">
+            <span class="callout-label">🔧 准备 — 依赖包</span>
+            <p>
+              本课引入 Workflows
+              运行时。在编写任何执行器代码之前，先添加这个包：
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>dotnet add package Microsoft.Agents.AI.Workflows --version 1.9.0</code></pre>
+            </div>
+            <p>
+              A1 中添加的 <code>Microsoft.Agents.AI</code> 和
+              <code>Microsoft.Agents.AI.Anthropic</code>
+              包仍然是必需的。本课不会在 <code>AiAgent.csproj</code> 中 A1
+              已有的条目之外新增任何 <code>&lt;NoWarn&gt;</code> 条目。
+            </p>
+          </div>
+
+          <ol class="steps">
+            <li>
+              <h3>引入 ClickHouse 客户端</h3>
+              <p>
+                B1 是第一节真正对 ClickHouse
+                跑查询的课。后面的探针执行器需要一个发 SQL
+                的工具，所以先加这个只读 HTTP 客户端。它把请求作为 HTTP POST
+                发给
+                ClickHouse，返回制表符分隔的文本（<code>TSVWithNames</code>）。连接设置来自配置；localhost
+                默认值让应用无需环境变量覆盖即可启动。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Tools/ClickHouseClient.cs</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>using Microsoft.Extensions.Configuration;
+
+namespace AiAgent.Tools;
+
+/// &lt;summary&gt;
+/// Thin HTTP client for ClickHouse, connecting as the read-only agent_ro user.
+/// Per-query limits are sent as URL settings on every request.
+/// &lt;/summary&gt;
+public sealed class ClickHouseClient(HttpClient http, IConfiguration config)
+{
+    private readonly string _baseUrl = config["CLICKHOUSE_URL"] ?? "http://localhost:8123";
+    private readonly string _user = config["CLICKHOUSE_USER"] ?? "agent_ro";
+    private readonly string _password = config["CLICKHOUSE_PASSWORD"] ?? "";
+
+    public async Task&lt;string&gt; QueryAsync(string sql, CancellationToken ct = default)
+    {
+        var url = $"{_baseUrl}/?user={Uri.EscapeDataString(_user)}" +
+                  $"&amp;password={Uri.EscapeDataString(_password)}" +
+                  "&amp;database=claudalytics" +
+                  "&amp;max_execution_time=30" +
+                  "&amp;max_result_rows=1000" +
+                  "&amp;result_overflow_mode=break";
+
+        var response = await http.PostAsync(url, new StringContent(sql + " FORMAT TSVWithNames"), ct);
+        var body = await response.Content.ReadAsStringAsync(ct);
+
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException($"ClickHouse error: {body.Trim()}");
+
+        return string.IsNullOrWhiteSpace(body) ? "(no rows)" : body.Trim();
+    }
+}</code></pre>
+              </div>
+              <p>
+                在 <code>Program.cs</code> 里、
+                <code>var app = builder.Build();</code> 之前注册它：
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — 在
+                    <code>var app = builder.Build();</code> 之前添加</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddHttpClient&lt;ClickHouseClient&gt;();</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>定义消息类型</h3>
+              <p>
+                消息是节点之间的契约，先定义它们，下面每个执行器才有可命名的输入输出。用
+                <code>sealed record</code
+                >：结构化相等、构造清晰，且避免意外的子类路由。消息类型都要能往返
+                JSON，因为引擎可能对它们做检查点（checkpoint）。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Workflows/InvestigationModels.cs</span>
+                </div>
+                <pre
+                  class="code-block"
+                ><code>using Microsoft.Agents.AI.Workflows;
+
+namespace AiAgent.Workflows;
+
+/// &lt;summary&gt;Workflow input: how many days of telemetry to investigate.&lt;/summary&gt;
+public sealed record InvestigationRequest(int Days);
+
+public sealed record ProbeJob(int Slot, string Name, string Sql, int Days);
+
+public sealed record ProbeResult(string Name, string Rows, bool HasData);</code></pre>
+              </div>
+              <p>
+                谁读谁：规划器发
+                <code>ProbeJob</code>，扇出（fan-out）分区器读它的
+                <code>Slot</code> 来路由；探针执行器发
+                <code>ProbeResult</code>，收集器读它来拼最终输出。<code
+                  >HasData</code
+                >
+                供后续课程的校验器使用。
+              </p>
+            </li>
+
+            <li>
+              <h3>编写规划器执行器</h3>
+              <p>
+                规划器是起始节点：把一个请求变成三条并行的探针任务。它收
+                <code>InvestigationRequest</code>，发三条
+                <code>ProbeJob</code>，后面的扇出边读每条的
+                <code>Slot</code> 决定路由。类上的
+                <code>[SendsMessage]</code>
+                特性声明允许发送的消息类型，省略它第一次
+                <code>SendMessageAsync</code> 就会在运行时抛异常。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs</span
+                  >
+                </div>
+                <pre class="code-block"><code>using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Workflows;
+
+namespace AiAgent.Workflows;
+
+[SendsMessage(typeof(ProbeJob))]
+public sealed class PlanExecutor() : Executor&lt;InvestigationRequest&gt;("plan")
+{
+    public override async ValueTask HandleAsync(
+        InvestigationRequest request, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        var days = Math.Clamp(request.Days, 1, 90);
+
+        ProbeJob[] jobs =
+        [
+            new(0, "cost-trend", $"""
+                SELECT toDate(Timestamp) AS day,
+                       round(sum(toFloat64OrZero(LogAttributes['cost_usd'])), 2) AS cost_usd
+                FROM otel_logs
+                WHERE LogAttributes['event.name'] = 'api_request'
+                  AND Timestamp &gt;= now() - INTERVAL {days} DAY
+                GROUP BY day ORDER BY day
+                """, days),
+            new(1, "tool-failures", $"""
+                SELECT LogAttributes['tool_name'] AS tool_name, count() AS calls,
+                       countIf(LogAttributes['success'] != 'true') AS failures
+                FROM otel_logs
+                WHERE LogAttributes['event.name'] = 'tool_result'
+                  AND Timestamp &gt;= now() - INTERVAL {days} DAY
+                GROUP BY tool_name ORDER BY failures DESC LIMIT 10
+                """, days),
+            new(2, "security-events", $"""
+                SELECT pattern_category, count() AS exposures
+                FROM credential_exposures
+                WHERE timestamp &gt;= now() - INTERVAL {days} DAY
+                GROUP BY pattern_category ORDER BY exposures DESC
+                """, days),
+        ];
+
+        foreach (var job in jobs)
+            await context.SendMessageAsync(job, cancellationToken: cancellationToken);
+    }
+}</code></pre>
+              </div>
+              <p>
+                来源：
+                <code>Workflows/InvestigationExecutors.cs — PlanExecutor</code
+                >。SQL 原样照搬；本课省略了自定义进度事件（那是 B2 的主题）。
+              </p>
+            </li>
+
+            <li>
+              <h3>编写探针执行器</h3>
+              <p>
+                这是工作节点：一个类，三个实例。每个实例收一条
+                <code>ProbeJob</code>，对 ClickHouse 跑 SQL，发一条
+                <code>ProbeResult</code>
+                给收集器读取。由扇出（fan-out）边决定哪个实例拿哪个任务，执行器本身不管路由。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/InvestigationExecutors.cs —
+                    添加到同一个文件中，位于
+                    <code>PlanExecutor</code> 的右花括号之后；步骤 2
+                    已经在文件顶部放好了 using 语句。</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>[SendsMessage(typeof(ProbeResult))]
+public sealed class ProbeExecutor(string id, ClickHouseClient clickHouse) : Executor&lt;ProbeJob&gt;(id)
+{
+    public override async ValueTask HandleAsync(
+        ProbeJob job, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        string rows;
+        try
+        {
+            rows = await clickHouse.QueryAsync(job.Sql, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            rows = $"QUERY FAILED: {ex.Message}";
+        }
+
+        var hasData = !rows.StartsWith("QUERY FAILED") &amp;&amp; rows != "(no rows)" &amp;&amp; rows.Any(char.IsDigit);
+        await context.SendMessageAsync(new ProbeResult(job.Name, rows, hasData), cancellationToken: cancellationToken);
+    }
+}</code></pre>
+              </div>
+              <p>
+                捕获查询失败可以防止扇入（fan-in）卡住：三个探针总会各自投递一个结果。应用这里还会写入工作流（workflow）状态——那是
+                <a href="../lesson07/index.html">B4</a> 的内容。
+              </p>
+            </li>
+
+            <li>
+              <h3>编写收集器执行器（executor）（♻ 脚手架（scaffolding））</h3>
+              <p>
+                收集器是汇合节点，位于扇入屏障（fan-in barrier）之后。它逐条收
+                <code>ProbeResult</code
+                >，加入一个列表，三条到齐后拼成一个字符串，作为工作流输出产出。
+              </p>
+              <p>
+                这个收集器是 ♻
+                脚手架：只拼接原始行，让你零成本看到扇入工作，会在
+                <a href="../lesson06/index.html">B3</a> 中被
+                <code>SynthesisExecutor</code> 取代。<code>accumulated</code>
+                存在实例字段里，是
+                <a href="../lesson07/index.html">B4</a> 剖析的问题。
+              </p>
+              <div class="tabs">
+                <div class="tab-bar">
+                  <button class="tab-btn active">
+                    v1 — 朴素版（拼接式收集器）
+                  </button>
+                  <button class="tab-btn">
+                    v2 预览 — SynthesisExecutor（在 B3 中构建，不在本课）
+                  </button>
+                </div>
+                <div class="tab-panel active">
+                  <div class="codewrap">
+                    <div class="code-meta">
+                      <span class="filename"
+                        >Workflows/InvestigationExecutors.cs —
+                        添加到同一个文件中，位于
+                        <code>ProbeExecutor</code> 的右花括号之后；using
+                        语句已在文件顶部。</span
+                      >
+                    </div>
+                    <pre class="code-block"><code>[YieldsOutput(typeof(string))]
+public sealed class CollectorExecutor() : Executor&lt;ProbeResult&gt;("collector")
+{
+    private readonly List&lt;ProbeResult&gt; accumulated = [];
+    private const int ExpectedProbes = 3;
+
+    public override async ValueTask HandleAsync(
+        ProbeResult result, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        accumulated.Add(result);
+
+        if (accumulated.Count &lt; ExpectedProbes)
+            return;
+
+        var combined = string.Join("\n\n", accumulated.Select(probe =>
+            $"=== {probe.Name} ===\n{probe.Rows}"));
+
+        await context.YieldOutputAsync(combined, cancellationToken);
+    }
+}</code></pre>
+                  </div>
+                  <div class="callout callout--note">
+                    <span class="callout-label">ℹ️</span>
+                    <p>
+                      <code>accumulated</code>
+                      实例字段对于单进程中的单次运行是可行的。它正是
+                      <a href="../lesson07/index.html">B4</a>
+                      中剖析的“状态存字段”陷阱：如果进程被杀死再恢复（resume），该字段会从空开始，输出就会缺失或不完整。眼下它能完成任务——让扇入（fan-in）变得可见、可测试。
+                    </p>
+                  </div>
+                </div>
+                <div class="tab-panel">
+                  <p>
+                    这是 B3 中取代 <code>CollectorExecutor</code> 的 v2
+                    节点：它持有一个真实的 <code>AIAgent</code>，把探针数据写成
+                    markdown 报告。这里只是预览，现在先别加。
+                  </p>
+                  <div class="codewrap">
+                    <div class="code-meta">
+                      <span class="filename"
+                        >Workflows/InvestigationExecutors.cs —
+                        SynthesisExecutor</span
+                      >
+                    </div>
+                    <pre class="code-block"><code>[YieldsOutput(typeof(string))]
+public sealed class SynthesisExecutor(AIAgent writer) : Executor&lt;Findings&gt;("synthesis")
+{
+    public override async ValueTask HandleAsync(
+        Findings findings, IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        var probesText = string.Join("\n\n", findings.Results.Select(probe =&gt;
+            $"## {probe.Name}\n{probe.Rows}"));
+        var notesText = findings.ValidationNotes.Count == 0
+            ? "(none)"
+            : string.Join("\n", findings.ValidationNotes);
+
+        var response = await writer.RunAsync($"""
+            Write a short markdown investigation report over the last {findings.Days} days of
+            Claude Code telemetry. Cost spike detected: {findings.CostSpike}.
+
+            Probe data (TSV):
+            {probesText}
+
+            Validator notes (mention them honestly):
+            {notesText}
+
+            Shape: headline numbers, findings, then 1-3 recommendations.
+            Use only the numbers in the data above.
+            """, cancellationToken: cancellationToken);
+
+        await context.YieldOutputAsync(response.Text, cancellationToken);
+    }
+}</code></pre>
+                  </div>
+                </div>
+              </div>
+            </li>
+
+            <li>
+              <h3>用 WorkflowBuilder 连接这张图</h3>
+              <p>
+                上面的执行器互不知道彼此，这里注册的边（edge）才把它们连成一张图。这一块创建各节点和
+                builder，builder
+                把起始执行器（规划器）作为构造函数参数，边在后面两块加。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Workflows/ProbeWorkflow.cs</span>
+                </div>
+                <pre class="code-block"><code>using AiAgent.Tools;
+using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Workflows;
+
+namespace AiAgent.Workflows;
+
+/// &lt;summary&gt;
+/// Probe pipeline — zero LLM:
+///
+///                     ┌─&gt; probe-0 ─┐
+///   plan ──fan-out────┼─&gt; probe-1 ─┼──fan-in barrier──&gt; collector ──&gt; output
+///                     └─&gt; probe-2 ─┘
+///
+/// CollectorExecutor is ♻ scaffolding replaced by SynthesisExecutor in B3.
+/// &lt;/summary&gt;
+public static class ProbeWorkflow
+{
+    public static Workflow Build(ClickHouseClient clickHouse)
+    {
+        var plan = new PlanExecutor();
+        ProbeExecutor[] probes =
+        [
+            new("probe-0", clickHouse),
+            new("probe-1", clickHouse),
+            new("probe-2", clickHouse),
+        ];
+        var collector = new CollectorExecutor();
+
+        var builder = new WorkflowBuilder(plan);</code></pre>
+              </div>
+              <p>
+                扇出边把规划器的任务发给探针。分区器 lambda 收每条
+                <code>ProbeJob</code>，读它的
+                <code>Slot</code> 选一个探针，返回目标索引数组。<code
+                  >job?.Slot ?? 0</code
+                >
+                容忍空消息——分区器绝不能因空值抛异常。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/ProbeWorkflow.cs — 在
+                    <code>Build</code> 内、builder 之后</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>        builder.AddFanOutEdge&lt;ProbeJob&gt;(plan, probes.Select(p =&gt; (ExecutorBinding)p),
+            (job, targetCount) =&gt; [(job?.Slot ?? 0) % targetCount]);</code></pre>
+              </div>
+              <p>
+                扇入屏障把并行的探针汇回一个节点：三个探针都投递
+                <code>ProbeResult</code> 后收集器才触发。<code
+                  >WithOutputFrom(collector)</code
+                >
+                把收集器标为终端节点；若指向某个探针，<code>RunAsync</code>
+                会在第一个探针后就返回，不等扇入。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Workflows/ProbeWorkflow.cs — 在
+                    <code>Build</code> 内、扇出边之后</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>        builder.AddFanInBarrierEdge(probes.Select(p =&gt; (ExecutorBinding)p), collector);
+
+        return builder.WithOutputFrom(collector).Build();
+    }
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>暴露一个探针端点（endpoint）</h3>
+              <p>
+                这是运行图的入口，每个请求构建一个全新的
+                <code>Workflow</code>。工作流实例由单个 runner
+                拥有，不能跨请求复用，否则一个请求的结果会串到另一个请求里。
+              </p>
+              <p>
+                <code>InProcessExecution.RunAsync(workflow, request)</code>
+                把图跑到完成并返回一个 <code>Run</code>。收集器用
+                <code>YieldOutputAsync</code> 产出的字符串会作为
+                <code>WorkflowOutputEvent</code> 出现在
+                <code>run.NewEvents</code> 里，它的
+                <code>Data</code> 就是要返回的值，所以循环扫描事件取这个输出。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — 在 <code>app.Run();</code> 之前添加</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>using Microsoft.Agents.AI.Workflows;
+
+app.MapPost("/probe", async (InvestigationRequest request, ClickHouseClient clickHouse, CancellationToken ct) =&gt;
+{
+    var workflow = ProbeWorkflow.Build(clickHouse);
+    var run = await InProcessExecution.RunAsync(workflow, request, cancellationToken: ct);
+
+    string? report = null;
+    foreach (var evt in run.NewEvents)
+        if (evt is WorkflowOutputEvent output)
+            report = output.Data?.ToString();
+
+    return Results.Ok(new { report });
+});</code></pre>
+              </div>
+              <p>
+                <strong>累积状态说明：</strong>
+                <code>ClickHouseClient</code> 在本课（B1）引入——上面的步骤 1
+                添加了该文件，并在
+                <code>var app = builder.Build();</code> 之前用
+                <code
+                  >builder.Services.AddHttpClient&lt;ClickHouseClient&gt;()</code
+                >
+                注册了它。<code>/probe</code> 端点直接从 DI
+                参数注入它；无需再做任何注册。
+              </p>
+            </li>
+          </ol>
+
+          <div class="callout callout--evolution">
+            <span class="callout-label">🔄 演进脉络</span>
+            <p>
+              <code>CollectorExecutor</code> 是第 1 弧（Arc 1）的
+              v1——刻意做得朴素。它以零 LLM
+              成本让扇入（fan-in）变得可观测（observability）。两个局限推动着接下来的课程：
+            </p>
+            <ul>
+              <li>
+                <strong>原始 TSV 不可读。</strong> 在
+                <a href="../lesson06/index.html">B3</a>
+                中，你会把收集器替换成一个持有写作智能体（writer agent）的
+                <code>SynthesisExecutor</code
+                >——同一张图，其中一个节点（node）现在变得智能了。
+              </li>
+              <li>
+                <strong><code>accumulated</code> 字段熬不过一次崩溃。</strong>
+                在
+                <a href="../lesson07/index.html">B4</a>
+                中，你会接入检查点（checkpoint）机制，在运行中途杀死进程，证明字段版本在恢复（resume）时失败；然后你会把状态搬进工作流（workflow）上下文。
+              </li>
+            </ul>
+          </div>
+
+          <h2>验证</h2>
+          <div class="gate">
+            <p class="gate-title">✅ 关卡（gate） — 未变绿前不要前进</p>
+
+            <p><strong>正常路径：</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/probe \
+  -H "Content-Type: application/json" \
+  -d '{"days": 7}' | jq .report</code></pre>
+            </div>
+            <p>
+              响应必须是一个非空字符串，包含全部三个探针名称（<code>cost-trend</code>、<code>tool-failures</code>、<code>security-events</code>）以及至少一行数据（如果
+              ClickHouse 尚未灌入数据，则为一行
+              <code>QUERY FAILED</code
+              >）。关键检查点是三个小节都出现了——这就证明扇入（fan-in）是在三个并行探针全部投递之后才触发的。
+            </p>
+
+            <p>
+              <strong>刻意失败练习（不花一分钱——无需 LLM）：</strong>
+            </p>
+            <p>
+              从 <code>PlanExecutor</code> 上移除
+              <code>[SendsMessage(typeof(ProbeJob))]</code>
+              特性，重新编译，再次调用该端点（endpoint）。你应该会看到：
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>System.InvalidOperationException: Executor 'plan' attempted to send message of type 'ProbeJob'
+which is not declared in its [SendsMessage] attributes.</code></pre>
+            </div>
+            <p>
+              把特性放回去。这段错误文本正是输出协议按设计在工作——契约是被强制执行的，而不是建议性的。
+            </p>
+
+            <p><strong>负向测试 — 分区器的空值容忍：</strong></p>
+            <p>
+              移除空值守卫：
+              <code>(job, targetCount) =&gt; [job.Slot % targetCount]</code
+              >。来自上游的空消息会在分区器内部产生一个
+              <code>NullReferenceException</code
+              >。恢复守卫。分区器必须始终容忍空值。
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ 常见坑</span>
+            <ul>
+              <li>
+                <strong
+                  >运行时抛出 "attempted to send message of type X, not
+                  declared"</strong
+                >
+                → 你忘了在执行器类上加
+                <code>[SendsMessage(typeof(X))]</code> 特性。检查每一个调用
+                <code>SendMessageAsync</code> 的执行器。
+              </li>
+              <li>
+                <strong>收集器只触发了一次，但输出里少了两个探针</strong>
+                → 扇入屏障（fan-in
+                barrier）没有正确注册；所有探针执行器（executor）都必须出现在传给
+                <code>AddFanInBarrierEdge</code> 的
+                <code>sources</code> 列表里。
+              </li>
+              <li>
+                <strong>分区器抛出 <code>NullReferenceException</code></strong>
+                → 在 lambda 里防范空值：
+                <code>(job, n) =&gt; [(job?.Slot ?? 0) % n]</code>。
+              </li>
+              <li>
+                <strong
+                  >工作流（workflow）在多个请求间被复用，收集器看到了多余的结果</strong
+                >
+                → 一个 <code>Workflow</code> 对象正好由一个 runner 拥有。用
+                <code>ProbeWorkflow.Build(...)</code>
+                为每个请求构建一个全新实例。 <code>CollectorExecutor</code> 的
+                <code>accumulated</code>
+                字段每次都从空开始，仅仅是因为执行器对象本身是新的。
+              </li>
+              <li>
+                <strong><code>WithOutputFrom</code> 指向了错误的执行器</strong>
+                →
+                <code>RunAsync</code>
+                会在第一个探针之后就返回，而不是等待扇入（fan-in）；始终把它指向最终的输出节点（node）。
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              标记本课完成
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

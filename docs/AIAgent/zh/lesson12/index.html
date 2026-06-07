@@ -1,0 +1,848 @@
+<!doctype html>
+<!-- lesson12/index.html — D2 · The router + menu registry -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>D2 · 路由器与菜单注册表 — MAF 课程</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="12">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">课程</a> / 模块 D / D2
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">
+              第 12 课 · D2 · 模块 D — 组合与编排（orchestration）
+            </p>
+            <h1>路由器与菜单注册表</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★★★</span>
+              <span class="badge badge--cost">Haiku</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>本课你将学到</h2>
+          <p>
+            现在 <code>POST /chat</code> 把每条消息都直接发给 DataAnalyst。
+            所以"你能做什么"既要付分析师档的成本，又只能得到编造的答案，
+            因为分析师没有一份真实的能力清单。你需要在前面加一个廉价的步骤，
+            读消息并决定它该去哪里。
+          </p>
+          <p>
+            编排器模式加的就是这个步骤：在更昂贵的分析师之前放一个分类智能体（agent）——
+            路由器（router）。本课你会把分类器构建两遍。第一版（v1）能用，
+            但它创建了三个必须保持同步的独立列表：路由器的提示词目录、手写的菜单端点，
+            以及分派用的 switch。第二版（v2）把这三者收拢进一个
+            <code>MenuRegistry</code
+            >——单一可信来源——这样新增一项能力只需添加一条记录。
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 讲解</span>
+            <p>
+              在 MAF
+              中，<strong>编排器模式</strong>（orchestration）指的是一个小巧、廉价、无工具的智能体（agent），
+              它负责对意图进行分类并路由（routing）到相应的处理器——它从不自己回答问题。关键的
+              MAF 接口是 <code>RunAsync&lt;T&gt;</code>（结构化输出，structured
+              output），它强制路由器返回一个带类型的
+              <code>RouteDecision</code>
+              记录，而不是一段散文。路由器和其他智能体一样，通过
+              <code>client.AsAIAgent(...)</code> 与
+              <code>.AsBuilder().UseOpenTelemetry(...).Build()</code>
+              注册——但它被刻意保持在 Light 模型档（model
+              tiering，最便宜、最快），因为它只做分类，不做推理。
+            </p>
+            <p>
+              <strong>MenuRegistry</strong> 不是 MAF
+              的类——它是用来驯服路由器的应用层模式。 它持有一个
+              <code>MenuItem</code> 记录的字典，每条记录携带一个
+              id、显示用的元数据、 参数提示，以及一个
+              <code>Invoke</code> 委托。从它身上会自动派生出两个视图：
+              <code>CatalogForPrompt()</code>（注入到路由器的系统指令中）和
+              <code>/menu</code> 的 JSON 响应（在 HTTP 层迭代生成）。而分派用的
+              switch 则简化成了单单一次
+              <code>menu.TryGet(route.TargetId)</code> 调用。
+            </p>
+          </div>
+
+          <h2>路由器（router）如何融入整个系统</h2>
+          <p>
+            每一次 <code>POST /chat</code> 的轮次都会先经过路由器。
+            路由器返回三种意图之一：
+          </p>
+          <ul>
+            <li>
+              <strong>chat</strong>——连同完整会话（session）转发给 DataAnalyst；
+              支付分析师档的成本。
+            </li>
+            <li>
+              <strong>menu</strong>——直接返回能力目录；不再发起任何 LLM 调用。
+            </li>
+            <li><strong>dispatch</strong>——调用指定的目录项；分析师不参与。</li>
+          </ul>
+          <p>
+            路由器从不看到完整的会话历史——它只看到最近几条用户消息（一个
+            <code>RecentUserMessages</code>
+            环形缓冲区）。这是有意为之：路由器的职责是
+            意图分类，而不是理解对话。
+          </p>
+
+          <h2>动手构建</h2>
+          <ol class="steps">
+            <li>
+              <h3>定义带类型的路由决策</h3>
+              <p>
+                路由器必须返回 <code>/chat</code> 能据以分支的数据，而不是散文。
+                创建 <code>Models/RouteDecision.cs</code>。它是路由器通过
+                <code>RunAsync&lt;RouteDecision&gt;</code> 返回的东西，Step 5 的
+                <code>/chat</code> switch 会读取其中的
+                <code>route.Intent</code>。
+                <code>[Description]</code> 特性是引导模型正确填字段的 schema
+                提示， 没有它们模型只会瞎猜。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Models/RouteDecision.cs</span>
+                </div>
+                <pre class="code-block"><code>using System.ComponentModel;
+
+namespace AiAgent.Models;
+
+/// &lt;summary&gt;
+/// The router's structured-output verdict for one user turn.
+/// &lt;/summary&gt;
+public sealed record RouteDecision(
+    [property: Description("One of: 'chat' (free-form data question or follow-up — send to the analyst), " +
+        "'menu' (user asks what the copilot can do, or wants to see the available actions), " +
+        "'dispatch' (the message clearly requests one specific catalog item).")]
+    string Intent,
+
+    [property: Description("When intent is 'dispatch': the id of the catalog item to run. Otherwise null.")]
+    string? TargetId,
+
+    [property: Description("When intent is 'dispatch': parameters extracted from the message, " +
+        "e.g. the time window like 'the last 7 days'. Otherwise null.")]
+    string? Parameters);</code></pre>
+              </div>
+              <p>
+                注意 <code>TargetId</code> 和 <code>Parameters</code> 是可空的——
+                对于非 dispatch 的意图，模型应当把它们留为 null。
+                <code>Intent</code>
+                上的描述约束是防止模型凭空发明新意图字符串的护栏。
+              </p>
+            </li>
+
+            <li>
+              <h3>构建 MenuRegistry——单一可信来源</h3>
+              <p>
+                注册表把这三个手工同步的列表收拢成单一可信来源。一条记录驱动三个消费方：路由器提示词、
+                <code>/menu</code> 端点和分派。创建
+                <code>Orchestration/MenuRegistry.cs</code>。先是
+                <code>MenuItem</code> 记录，每项带显示字段和一个运行真实
+                agent/workflow 并返回文本的 <code>Invoke</code> 委托：
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Orchestration/MenuRegistry.cs</span>
+                </div>
+                <pre class="code-block"><code>namespace AiAgent.Orchestration;
+
+public sealed record MenuItem(
+    string Id,
+    string Title,
+    string Description,
+    string ParamsHint,
+    string TargetKind,
+    string ModelTier,
+    Func&lt;string?, CancellationToken, Task&lt;string&gt;&gt; Invoke);</code></pre>
+              </div>
+              <p>
+                然后是注册表本身。它把各项按 id 存入大小写不敏感的字典，
+                并暴露三个读取口，各对应一个消费方：<code>Items</code> 由
+                <code>/menu</code> 端点读，<code>TryGet</code> 由分派分支调，
+                <code>CatalogForPrompt()</code> 是路由器提示词插值的文本：
+              </p>
+              <div class="codewrap">
+                <pre
+                  class="code-block"
+                ><code>public sealed class MenuRegistry(IEnumerable&lt;MenuItem&gt; items)
+{
+    private readonly Dictionary&lt;string, MenuItem&gt; _items =
+        items.ToDictionary(item =&gt; item.Id, StringComparer.OrdinalIgnoreCase);
+
+    public IReadOnlyCollection&lt;MenuItem&gt; Items =&gt; _items.Values;
+
+    public bool TryGet(string id, out MenuItem item) =&gt; _items.TryGetValue(id, out item!);
+
+    public string CatalogForPrompt() =&gt; string.Join("\n", _items.Values.Select(item =&gt;
+        $"- {item.Id}: {item.Description} (params: {item.ParamsHint})"));
+}</code></pre>
+              </div>
+              <p>
+                <code>TryGet</code> 有意做成大小写不敏感。路由器可能返回
+                <code>"Weekly-Report"</code>，而 id 是
+                <code>"telemetry-report"</code>，查找仍要匹配上。
+                <code>CatalogForPrompt()</code> 为每项渲染一个条目，
+                路由器把它读作自己的分派目录。
+              </p>
+            </li>
+
+            <li>
+              <h3>v1：硬编码提示词目录与 switch 的路由器</h3>
+              <p>
+                现在把你刚构建好的注册表，与它所取代的朴素版本对比一下。这个 v1
+                下面的 v1 只是用来暴露注册表所解决的问题——你不会把它发上线。
+                读一读，然后看看它在哪儿崩坏。
+              </p>
+
+              <div class="tabs">
+                <div class="tab-bar">
+                  <button class="tab-btn active">
+                    v1 — 朴素版（仅作说明）
+                  </button>
+                  <button class="tab-btn">v2 — 注册表驱动（推荐）</button>
+                </div>
+
+                <div class="tab-panel active">
+                  <p>
+                    在 v1
+                    中，路由器的指令把目录硬编码成一个字面字符串，菜单端点返回
+                    第二份硬编码列表，而分派处理器是一个每项能力对应一个 case 的
+                    <code>switch</code>：
+                  </p>
+                  <div class="codewrap">
+                    <pre
+                      class="code-block"
+                    ><code>// v1 Router — prompt catalog hardcoded (naive approach — do not ship)
+var instructions = """
+    Classify the user message into: chat | menu | dispatch.
+    Catalog:
+    - telemetry-report: runs the full multi-agent weekly report
+    - cost-audit: detailed cost breakdown and savings advice
+    Output only the structured decision.
+    """;
+
+// v1 /menu endpoint — SECOND copy of the same list
+app.MapGet("/menu", () =&gt; Results.Ok(new {
+    items = new[] {
+        new { id = "telemetry-report", title = "Weekly report" },
+        new { id = "cost-audit",    title = "Cost audit" },
+    }
+}));
+
+// v1 /chat dispatch branch — THIRD copy
+case "dispatch":
+    return route.TargetId switch {
+        "telemetry-report" =&gt; await RunWeeklyReport(route.Parameters, ct),
+        "cost-audit"    =&gt; await RunCostAudit(route.Parameters, ct),
+        _               =&gt; Results.BadRequest(new { error = "unknown target" }),
+    };</code></pre>
+                  </div>
+                  <p>
+                    这能用——直到你新增一项能力。那时你必须更新路由器的指令字符串、
+                    菜单端点列表，以及分派 switch。三处改动，三次失同步的机会。
+                  </p>
+                </div>
+
+                <div class="tab-panel">
+                  <p>
+                    在 v2 中，注册表是声明能力的唯一地方。
+                    <code>Agents/Router.cs</code> 分三部分构建。
+                    第一部分：类接收 <code>MenuRegistry</code> 参数并读取 API
+                    key， 这样构建提示词时目录已经可用：
+                  </p>
+                  <div class="codewrap">
+                    <div class="code-meta">
+                      <span class="filename">Agents/Router.cs</span>
+                    </div>
+                    <pre class="code-block"><code>using AiAgent.Orchestration;
+using Anthropic;
+using Microsoft.Agents.AI;
+
+namespace AiAgent.Agents;
+
+public static class Router
+{
+    public static AIAgent Create(IConfiguration config, MenuRegistry menu, ILoggerFactory loggerFactory)
+    {
+        var apiKey = config["ANTHROPIC_API_KEY"]
+            ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not set.");
+
+        IAnthropicClient client = new AnthropicClient { ApiKey = apiKey };</code></pre>
+                  </div>
+                  <p>
+                    第二部分是指令字符串。它直接插值
+                    <code>menu.CatalogForPrompt()</code
+                    >，所以提示词本身就是注册表。
+                    这里的三个意图名（dispatch、menu、chat）就是 Step 5 的
+                    <code>/chat</code> switch 匹配的字符串：
+                  </p>
+                  <div class="codewrap">
+                    <pre
+                      class="code-block"
+                    ><code>        var instructions = $"""
+            You are the router for the Claudalytics copilot. Classify each user message
+            into exactly one intent:
+
+            - "dispatch": the message clearly asks to run ONE of these catalog items.
+              Set targetId to the item id and extract parameters (e.g. a time window)
+              from the message into parameters. Catalog:
+            {menu.CatalogForPrompt()}
+            - "menu": the user asks what the copilot can do, what actions/reports are
+              available, or for help/options.
+            - "chat": everything else — ad-hoc data questions, follow-ups, analysis
+              requests that do not name a catalog item. When in doubt, choose "chat".
+
+            Output only the structured decision. Never answer the question yourself.
+            """;</code></pre>
+                  </div>
+                  <p>
+                    第三部分：在 Light 模型档构建 agent 并接上 OpenTelemetry。
+                    路由器是有意做得廉价的。它的 span 携带 Light 档的 model id，
+                    这就是 <code>otel_traces</code> 里廉价档处理了该轮次的证据：
+                  </p>
+                  <div class="codewrap">
+                    <pre
+                      class="code-block"
+                    ><code>        var agent = client.AsAIAgent(
+            model: ModelTiers.Light(config),
+            instructions: instructions,
+            name: "router",
+            description: "Classifies each turn into chat | menu | dispatch.");
+
+        return agent.AsBuilder()
+            .UseOpenTelemetry(AgentFactory.OtelSourceName)
+            .Build();
+    }
+}</code></pre>
+                  </div>
+                  <p>
+                    <code>IConfiguration</code> 和
+                    <code>ILoggerFactory</code> 来自
+                    <code>Microsoft.Extensions.*</code> 的隐式 using（.NET
+                    9）。无需新增 NuGet 包——<code>Anthropic</code> 和
+                    <code>Microsoft.Agents.AI</code> 早在 A1 就已加入。
+                  </p>
+                </div>
+              </div>
+            </li>
+
+            <li>
+              <h3>注册注册表并接入第一个目录项</h3>
+              <p>
+                注册表不填就是空的。把它注册为单例并带一个起始项，再注册路由器，
+                因为路由器把注册表当参数。第一项是来自
+                <a href="../lesson11/index.html">D1</a> 的周报——
+                它本身已经是工作流（workflow）即智能体（agent），所以
+                <code>Invoke</code> 委托只需调用
+                <code>ReportRunner.RunAsync</code>。这一条记录就是路由器提示词、
+                <code>/menu</code> 端点和分派都读取的内容。
+              </p>
+              <div class="callout callout--note">
+                <span class="callout-label">ℹ️ DI 注册顺序</span>
+                <p>
+                  <code>MenuRegistry</code> 的工厂会调用
+                  <code
+                    >sp.GetRequiredKeyedService&lt;AIAgent&gt;("report")</code
+                  >——这会在首次使用时解析（单例工厂是惰性的），
+                  但保持注册顺序明确可以避免启动时或测试中出现意外：
+                </p>
+                <ol>
+                  <li>
+                    注册 <code>"report"</code> 键控智能体（agent）（<code
+                      >AddKeyedSingleton&lt;AIAgent&gt;("report", ...)</code
+                    >）——来自 D1。
+                  </li>
+                  <li>注册 <code>MenuRegistry</code>（如下）。</li>
+                  <li>
+                    最后注册 <code>"router"</code> 键控智能体——它把
+                    <code>MenuRegistry</code> 作为构造函数参数。
+                  </li>
+                </ol>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — DI section (before var app =
+                    builder.Build())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddSingleton&lt;MenuRegistry&gt;(sp =&gt;
+{
+    var reportAgent = sp.GetRequiredKeyedService&lt;AIAgent&gt;("report");
+
+    return new MenuRegistry(
+    [
+        new MenuItem(
+            Id: "telemetry-report",
+            Title: "Weekly report",
+            Description: "Full multi-agent telemetry report: cost, security and tooling " +
+                         "analysts run concurrently, a summarizer writes the report.",
+            ParamsHint: "time window and optionally a project, e.g. 'last 7 days, project claudalytics'",
+            TargetKind: "workflow",
+            ModelTier: "Analyst+Reasoning",
+            Invoke: async (parameters, ct) =&gt;
+            {
+                var window = string.IsNullOrWhiteSpace(parameters) ? "the last 7 days" : parameters;
+                var (report, _) = await ReportRunner.RunAsync(reportAgent, window, ct);
+                return report;
+            }),
+    ]);
+});</code></pre>
+              </div>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — DI section, after MenuRegistry registration
+                    (before var app = builder.Build())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddKeyedSingleton&lt;AIAgent&gt;("router", (sp, _) =&gt; Router.Create(
+    sp.GetRequiredService&lt;IConfiguration&gt;(),
+    sp.GetRequiredService&lt;MenuRegistry&gt;(),
+    sp.GetRequiredService&lt;ILoggerFactory&gt;()));</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>改造 /chat 端点（endpoint），让其先经过路由器</h3>
+              <p>
+                这里分类器才派上用场。聊天端点先运行路由器，再按
+                <code>route.Intent</code> 分支。分析师路径变成
+                <code>default</code> 分支，它就是之前那条直连聊天路径，
+                现在被分类步骤守在前面。这一个端点分四部分构建。
+              </p>
+              <p>
+                第一部分是处理器签名和路由器调用：注入键控的
+                <code>"router"</code> 和
+                <code>menu</code
+                >，取会话，用最近消息构建小提示词，运行路由器拿到
+                <code>RouteDecision</code>。
+                <code>[FromKeyedServices]</code> 已被 .NET 9 隐式 using 覆盖，
+                无需额外 <code>using</code>：
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — endpoint section (after var app =
+                    builder.Build())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/chat", async (ChatRequest request, AIAgent agent,
+    [FromKeyedServices("router")] AIAgent router, MenuRegistry menu,
+    ConcurrentDictionary&lt;string, AgentSession&gt; sessions,
+    ConcurrentDictionary&lt;string, PendingApproval&gt; approvals,
+    RecentUserMessages recent, CancellationToken ct) =&gt;
+{
+    if (string.IsNullOrWhiteSpace(request.Message))
+        return Results.BadRequest(new { error = "message is required" });
+
+    var (sessionId, session) = await GetOrCreateSessionAsync(request.SessionId, agent, sessions, ct);
+
+    var routerPrompt = $"""
+        Recent user messages in this session:
+        {recent.Describe(sessionId)}
+
+        New user message: {request.Message}
+        """;
+    var route = (await router.RunAsync&lt;RouteDecision&gt;(routerPrompt, cancellationToken: ct)).Result;
+    recent.Add(sessionId, request.Message);
+
+    switch (route.Intent.ToLowerInvariant())
+    {</code></pre>
+              </div>
+              <p>
+                <code>menu</code> 分支直接返回目录，不再发 LLM 调用。 它读
+                <code>menu.Items</code
+                >，也就是路由器提示词所基于的同一个注册表：
+              </p>
+              <div class="codewrap">
+                <pre class="code-block"><code>        case "menu":
+            return Results.Ok(new
+            {
+                sessionId,
+                kind = "menu",
+                answer = (string?)null,
+                menu = menu.Items.Select(item =&gt; new
+                {
+                    id = item.Id,
+                    title = item.Title,
+                    description = item.Description,
+                    paramsHint = item.ParamsHint,
+                }),
+                toolCalls = Array.Empty&lt;object&gt;(),
+                approvalRequest = (object?)null,
+            });</code></pre>
+              </div>
+              <p>
+                <code>dispatch</code> 分支用 <code>menu.TryGet</code> 查目标
+                id， 再运行该项的 <code>Invoke</code> 委托。
+                <a
+                  href="https://learn.microsoft.com/dotnet/csharp/language-reference/operators/patterns"
+                  >模式匹配守卫</a
+                >
+                （<code
+                  >when route.TargetId is not null &amp;&amp;
+                  menu.TryGet(...)</code
+                >）让未知 id 根本不匹配这个 case，而是落到
+                <code>default</code>，不会抛异常：
+              </p>
+              <div class="codewrap">
+                <pre
+                  class="code-block"
+                ><code>        case "dispatch" when route.TargetId is not null &amp;&amp; menu.TryGet(route.TargetId, out var item):
+            var dispatched = await item.Invoke(route.Parameters, ct);
+            return Results.Ok(new
+            {
+                sessionId,
+                kind = "answer",
+                answer = dispatched,
+                menu = (object?)null,
+                toolCalls = new[] { new { name = item.Id, arguments = (object?)route.Parameters } },
+                approvalRequest = (object?)null,
+            });</code></pre>
+              </div>
+              <p>
+                <code>default</code>
+                分支就是原来的直连聊天路径。它处理三种情况：
+                真正的聊天、未知目标落下来的分派，以及模型编造的任意意图。
+                所以端点不会因为一次错误分类而返回 500：
+              </p>
+              <div class="codewrap">
+                <pre class="code-block"><code>        default:
+            var response = await agent.RunAsync(request.Message, session, cancellationToken: ct);
+            return Results.Ok(ToChatResponse(sessionId, session, response, approvals));
+    }
+});</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>新增 /menu 和 /menu/invoke 端点</h3>
+              <p>
+                同一个注册表还驱动另外两个端点，让目录不经过路由器也能访问。
+                <code>GET /menu</code> 是未来 UI 渲染成按钮的机器可读目录，
+                <code>POST /menu/invoke</code>
+                直接运行某一项，对脚本或测试有用。 <code>GET /menu</code> 读
+                <code>menu.Items</code>； <code>/menu/invoke</code> 用
+                <code>menu.TryGet</code> 再调该项的 <code>Invoke</code> 委托：
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — endpoint section (after var app =
+                    builder.Build())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapGet("/menu", (MenuRegistry menu) =&gt; Results.Ok(new
+{
+    items = menu.Items.Select(item =&gt; new
+    {
+        id = item.Id,
+        title = item.Title,
+        description = item.Description,
+        paramsHint = item.ParamsHint,
+        targetKind = item.TargetKind,
+        modelTier = item.ModelTier,
+    }),
+}));
+
+app.MapPost("/menu/invoke", async (MenuInvokeRequest request, MenuRegistry menu, CancellationToken ct) =&gt;
+{
+    if (string.IsNullOrWhiteSpace(request.ItemId) || !menu.TryGet(request.ItemId, out var item))
+        return Results.NotFound(new { error = $"unknown menu item '{request.ItemId}'" });
+
+    var answer = await item.Invoke(request.Params, ct);
+    return Results.Ok(new
+    {
+        sessionId = request.SessionId,
+        kind = "answer",
+        answer,
+        menu = (object?)null,
+        toolCalls = new[] { new { name = item.Id, arguments = (object?)request.Params } },
+        approvalRequest = (object?)null,
+    });
+});</code></pre>
+              </div>
+              <p>
+                <code>MenuInvokeRequest</code> 是
+                <code>/menu/invoke</code> 的请求体，一个
+                <code>internal sealed record</code>——把它放在
+                <code>app.Run();</code> 之后的文件作用域，而不是端点 lambda
+                内部：
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — file scope, after app.Run()</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>internal sealed record MenuInvokeRequest(string ItemId, string? Params, string? SessionId);</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>为路由器上下文（context）新增 RecentUserMessages 辅助类</h3>
+              <p>
+                像"现在改成上个月"这样的追问，路由器没有历史就看不懂。所以它只接收
+                最近 3
+                条用户消息，而不是完整会话。这让路由器调用保持廉价，也不把分析师档
+                上下文泄漏进 Light 档调用。Step 5 的
+                <code>/chat</code> 处理器通过
+                <code>recent.Describe(sessionId)</code> 读它来构建提示词，
+                每轮结束用 <code>recent.Add</code> 写它。把这个辅助类加到
+                <code>Program.cs</code>：
+              </p>
+              <p>
+                首先，在 DI 部分注册它（位于
+                <code>var app = builder.Build();</code> 之前）：
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — DI section (before var app =
+                    builder.Build())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>builder.Services.AddSingleton&lt;RecentUserMessages&gt;();</code></pre>
+              </div>
+              <p>
+                然后把类定义加到 <code>app.Run();</code> 之后的文件作用域—— 和
+                <code>Program.cs</code> 里的其他辅助类型一样，它住在文件底部：
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs — file scope, after app.Run()</span
+                  >
+                </div>
+                <pre class="code-block"><code>/// &lt;summary&gt;
+/// Last few user messages per session — given to the router so follow-ups
+/// ("now for last month") classify correctly without a full agent session.
+/// &lt;/summary&gt;
+internal sealed class RecentUserMessages
+{
+    private const int Keep = 3;
+    private readonly ConcurrentDictionary&lt;string, Queue&lt;string&gt;&gt; _store = new();
+
+    public void Add(string sessionId, string message)
+    {
+        var queue = _store.GetOrAdd(sessionId, _ =&gt; new Queue&lt;string&gt;());
+        lock (queue)
+        {
+            queue.Enqueue(message);
+            while (queue.Count &gt; Keep) queue.Dequeue();
+        }
+    }
+
+    public string Describe(string sessionId)
+    {
+        if (!_store.TryGetValue(sessionId, out var queue)) return "(none)";
+        lock (queue)
+        {
+            return queue.Count == 0 ? "(none)" : string.Join("\n", queue.Select(m =&gt; $"- {m}"));
+        }
+    }
+}</code></pre>
+              </div>
+              <p>
+                如果没有最近消息的上下文（context），像"现在改成上个月"这样的后续追问到达路由器时
+                就没有历史可循——它无法判断用户是在追问一份周报，还是在请求一次成本查询。
+                这个环形缓冲区解决了这个问题，又不必把整个会话（session）穿透传给路由器。
+              </p>
+            </li>
+          </ol>
+
+          <div class="callout callout--evolution">
+            <span class="callout-label">🔄 演进脉络</span>
+            <p>本课<strong>同时解决了两条演进脉络</strong>：</p>
+            <ul>
+              <li>
+                <strong>脉络 4（D2）：</strong
+                >之前的直连聊天端点前面没有分类器——
+                它无法暴露能力目录，也无法分派给已命名的工作流（workflow）。路由器补上了这一层。
+                原来的直连聊天路径并没有被丢弃——它变成了
+                <code>default</code> 分支，作为 chat 意图存活下来。
+              </li>
+              <li>
+                <strong>脉络 5（D2）：</strong>v1
+                路由器硬编码的提示词目录、菜单列表 和分派 switch
+                是三处每次新增能力都会失同步的地方。
+                <code>MenuRegistry</code> 把这三者收拢成了一条记录。
+                那三个列表被丢弃了。
+              </li>
+            </ul>
+            <p>
+              在
+              <a href="../lesson13/index.html">D3</a> 中，注册表会随着洞察专家
+              和更多工作流（workflow）项一起壮大；注册表模式以零结构性改动吸纳每一条新记录。
+            </p>
+          </div>
+
+          <h2>验证</h2>
+          <div class="gate">
+            <p class="gate-title">✅ 关卡（gate） — 未变绿前不要前进</p>
+
+            <p><strong>启动服务器：</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>dotnet run -- --environment Testing</code></pre>
+            </div>
+            <p>控制台必须打印 <code>Hosting environment: Testing</code>。</p>
+
+            <p><strong>检查 1 — menu 意图：</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "what can you do?"}' | jq .kind</code></pre>
+            </div>
+            <p>
+              预期：<code>"menu"</code>。响应中的
+              <code>menu</code> 数组必须包含 <code>"telemetry-report"</code>。
+              没有发起任何 LLM 分析师调用。
+            </p>
+
+            <p><strong>检查 2 — 数据问题路由到 chat：</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "which project spent the most last week?"}' | jq '{kind, toolCalls: (.toolCalls | length)}'</code></pre>
+            </div>
+            <p>
+              预期：<code>kind: "answer"</code>，且至少有一次工具调用（tool
+              call） （分析师执行了 SQL）。
+            </p>
+
+            <p>
+              <strong>检查 3 — dispatch 路由到周报：</strong>
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "run the weekly report for the last 7 days"}' | jq '{kind, toolCalls}'</code></pre>
+            </div>
+            <p>
+              预期：<code>kind: "answer"</code>，且
+              <code>toolCalls[0].name == "telemetry-report"</code>。该回答是
+              多智能体（agent）报告，而不是一次直接的分析师响应。
+            </p>
+
+            <p><strong>检查 4 — GET /menu 由注册表驱动：</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s http://localhost:8124/menu | jq '.items[].id'</code></pre>
+            </div>
+            <p>
+              预期：<code>"telemetry-report"</code>
+              出现。新增第二条注册表记录会让它
+              自动出现在这里——通过添加一条占位记录、确认它无需改动端点就显示出来，
+              来证明这一点。
+            </p>
+
+            <p>
+              <strong>反向测试 — 未知分派目标优雅降级：</strong>
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "run the nonexistent-feature"}' | jq .kind</code></pre>
+            </div>
+            <p>
+              预期：<code>"answer"</code>（落到了聊天分析师上）， 而不是 500 或
+              <code>"error"</code>。分派守卫回退到
+              <code>default</code> 正是让这一切安全的原因。如果你看到 500 或
+              null 的 kind，说明模式匹配守卫没有捕捉到未知 id。
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ 常见坑</span>
+            <ul>
+              <li>
+                <strong>路由器返回纯散文而非 JSON</strong> →
+                路由器上注册了工具（tool）。
+                <code>RunAsync&lt;T&gt;</code> 结构化输出（structured
+                output）与单次运行中的工具使用相冲突——
+                路由器必须是无工具的。从路由器的
+                <code>AsAIAgent</code> 调用中移除任何工具注册。
+              </li>
+              <li>
+                <strong>即便是已知能力，dispatch 也总是落到 chat</strong>
+                →
+                <code>RouteDecision.TargetId</code> 的大小写与注册表的键不匹配。
+                <code>MenuRegistry</code> 构造函数使用了
+                <code>StringComparer.OrdinalIgnoreCase</code>——请确认
+                <code>TryGet</code> 是用原始的
+                <code>route.TargetId</code> 调用的，而不是一个手动小写化的副本。
+              </li>
+              <li>
+                <strong>"你能做什么？"被分析师用编造出来的能力回答了</strong>
+                → 路由器没有接好。确认
+                <code>[FromKeyedServices("router")]</code> 加在了 /chat
+                处理器的参数上，并且路由器是以匹配的键
+                <code>"router"</code> 注册的。
+              </li>
+              <li>
+                <strong>路由器提示词目录与菜单列表不一致</strong> →
+                某处在注册表之外把一条注册表记录当成字符串直接改了。
+                务必通过往注册表构造函数添加一个
+                <code>MenuItem</code> 来新增能力；切勿在别处硬编码同样的信息。
+              </li>
+              <li>
+                <strong>后续消息被路由到 menu 而非 dispatch/chat</strong>
+                → <code>RecentUserMessages</code> 没被注册或没被注入。
+                没有会话（session）上下文（context），路由器会孤立地看每条消息，从而把"把那个改成上个月跑一遍"
+                误分类为菜单请求。
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              标记本课完成
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

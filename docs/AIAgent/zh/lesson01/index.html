@@ -1,0 +1,645 @@
+<!doctype html>
+<!-- lesson01/index.html — A1: Your first agent + a function tool -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>A1 · 你的第一个智能体 + 一个函数工具 — MAF 课程</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body data-lesson="01">
+    <div class="lesson-shell">
+      <nav class="sidebar" id="sidebar"></nav>
+
+      <main class="lesson-main">
+        <div class="lesson-inner">
+          <div class="breadcrumb">
+            <a href="../index.html">课程</a> / 模块 A / A1
+          </div>
+
+          <header class="lesson-head">
+            <p class="lesson-eyebrow">
+              第 01 课 · A1 · 模块 A — Hello 智能体（agent）
+            </p>
+            <h1>你的第一个智能体（agent） + 一个函数工具（function tool）</h1>
+            <div class="meta-row">
+              <span class="badge badge--diff">★</span>
+              <span class="badge badge--cost">Haiku</span>
+            </div>
+          </header>
+
+          <!-- CONTENT START -->
+
+          <h2>你将学到什么</h2>
+          <p>
+            直接问一个裸 LLM“我的 telemetry
+            里有哪些表”，它会自信地编出根本不存在的列名，因为它从没见过你的
+            ClickHouse
+            schema。解决办法是智能体（agent）：一个接入了工具调用（tool
+            call）循环的 LLM，你给它一个返回真实 schema 的 C#
+            方法，让它在回答前先调用这个方法。
+          </p>
+          <p>
+            在 MAF
+            中你给智能体一个名字、一条系统指令、一个模型和一组可调用函数，MAF
+            负责在模型和代码之间来回传递，直到模型不再请求工具结果。本课用三个
+            API 面来实现 ——
+            <code>ChatClientAgentOptions</code>、<code
+              >AIFunctionFactory.Create</code
+            >
+            和
+            <code>client.AsAIAgent</code>，并搭好后续每课当作关卡（gate）检查的
+            Testing 环境启动步骤。
+          </p>
+
+          <div class="callout callout--teach">
+            <span class="callout-label">📘 讲解</span>
+            <p>
+              <strong>心智模型：</strong
+              >智能体（agent）就是一个处于工具调用（tool
+              call）循环中、并带有可配置记忆的 LLM。三个 MAF API
+              面负责这套接线：
+            </p>
+            <ul>
+              <li>
+                <strong><code>ChatClientAgentOptions</code></strong> —— 名称、
+                描述、<code>ChatOptions.Instructions</code>（系统 提示词（system
+                prompt））、<code>ChatOptions.ModelId</code>，以及
+                <code>Tools</code>
+                列表。所有选项都集中在一个对象里；智能体（agent）的身份与能力被一并声明。
+              </li>
+              <li>
+                <strong><code>AIFunctionFactory.Create(method)</code></strong>
+                —— 把任意一个普通的 C#
+                实例方法变成模型可以调用的工具（tool）。方法及其参数上的
+                <code>[Description("…")]</code> 特性会成为 LLM 收到的工具
+                schema。无需手写 schema。
+              </li>
+              <li>
+                <strong
+                  ><code>IAnthropicClient.AsAIAgent(options)</code></strong
+                >
+                —— 根据提供方客户端 + 选项创建出 <code>AIAgent</code>。在
+                <a href="../lesson03/index.html">A3</a> 中你会在这里链式调用
+                <code>.AsBuilder().UseOpenTelemetry(…).Build()</code
+                >；目前这种直接调用就足够了。
+              </li>
+            </ul>
+            <p>
+              <code>agent.RunAsync(prompt)</code> 会运行一个完整的工具调用（tool
+              call）循环， 并返回一个 <code>AgentResponse</code>。<code
+                >.Text</code
+              >
+              属性保存模型最终的回复；
+              <code>.Messages</code> 保存完整的对话记录，包括中间的工具调用。
+            </p>
+          </div>
+
+          <h2>Testing 环境仪式</h2>
+          <p>
+            每一个关卡都用
+            <code>dotnet run -- --environment Testing</code> 来启动（其中的
+            <code>--</code> 至关重要）。完整解释和反向测试见
+            <a href="../lesson00/index.html">L0</a>。
+          </p>
+
+          <div class="callout callout--build">
+            <span class="callout-label">🔧 准备 — 依赖包</span>
+            <p>
+              在写任何代码之前先添加 MAF 依赖包。A1
+              你只需要这两个；后续课程会再加入 Workflows 和 OTel 相关的包。
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>dotnet add package Microsoft.Agents.AI --version 1.9.0
+dotnet add package Microsoft.Agents.AI.Anthropic --version 1.9.0-preview.260603.1</code></pre>
+            </div>
+            <p>
+              后面用到的上下文压缩（compaction）和 chat-reducer API
+              被标记为实验性。现在就把这些警告抑制掉，让构建保持干净：在
+              <code>AiAgent.csproj</code> 的
+              <code>&lt;PropertyGroup&gt;</code> 中加入
+              <code>&lt;NoWarn&gt;$(NoWarn);MAAI001;MEAI001&lt;/NoWarn&gt;</code
+              >：
+            </p>
+            <div class="codewrap">
+              <div class="code-meta">
+                <span class="filename"
+                  >AiAgent.csproj (PropertyGroup addition)</span
+                >
+              </div>
+              <pre class="code-block"><code>&lt;PropertyGroup&gt;
+  &lt;TargetFramework&gt;net9.0&lt;/TargetFramework&gt;
+  &lt;Nullable&gt;enable&lt;/Nullable&gt;
+  &lt;ImplicitUsings&gt;enable&lt;/ImplicitUsings&gt;
+  &lt;!-- MAAI001/MEAI001: compaction + chat-reducer APIs are marked experimental
+       in MAF 1.9.0 / M.E.AI 10.5 — accepted for this learning build. --&gt;
+  &lt;NoWarn&gt;$(NoWarn);MAAI001;MEAI001&lt;/NoWarn&gt;
+&lt;/PropertyGroup&gt;</code></pre>
+            </div>
+            <p>
+              另外创建两个配置文件（其中
+              <code>appsettings.Local.json</code> 已被 git 忽略）：
+            </p>
+            <div class="codewrap">
+              <div class="code-meta">
+                <span class="filename">appsettings.Testing.json</span>
+              </div>
+              <pre class="code-block"><code>{
+  "Models": {
+    "Light":    "claude-haiku-4-5",
+    "Analyst":  "claude-haiku-4-5",
+    "Reasoning":"claude-haiku-4-5"
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.Agents.AI": "Debug"
+    }
+  }
+}</code></pre>
+            </div>
+            <div class="codewrap">
+              <div class="code-meta">
+                <span class="filename"
+                  >appsettings.Local.json (gitignored — secrets only)</span
+                >
+              </div>
+              <pre class="code-block"><code>{
+  "ANTHROPIC_API_KEY": "sk-ant-..."
+}</code></pre>
+            </div>
+            <p>
+              把 <code>appsettings.Local.json</code> 加入
+              <code>.gitignore</code>。该密钥最后被加载，会覆盖其他一切 ——
+              千万不要提交它。
+            </p>
+          </div>
+
+          <h2>动手实现</h2>
+          <ol class="steps">
+            <li>
+              <h3>从一开始就理解模型分层（model tiering）</h3>
+              <p>
+                硬编码模型 id 会让每次测试都按 Sonnet
+                计费，还得翻代码改模型，这正是
+                <a href="../lesson13/index.html">D3</a>
+                把它当作反模式的原因。所以项目从第一天起就用一个静态辅助类从配置读取模型名。
+              </p>
+              <p>
+                <code>Agents/ModelTiers.cs</code> 是叶子文件，无依赖。每个方法从
+                <code>IConfiguration</code>
+                读取一个分层名，缺失时用默认值兜底。<code>AgentFactory</code>（步骤
+                4）调用 <code>ModelTiers.Analyst(config)</code> 来选定模型。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Agents/ModelTiers.cs</span>
+                </div>
+                <pre class="code-block"><code>namespace AiAgent.Agents;
+
+public static class ModelTiers
+{
+    public static string Light(IConfiguration config) => config["Models:Light"] ?? "claude-haiku-4-5";
+
+    public static string Analyst(IConfiguration config) => config["Models:Analyst"] ?? "claude-sonnet-4-6";
+
+    public static string Reasoning(IConfiguration config) => config["Models:Reasoning"] ?? "claude-opus-4-8";
+}</code></pre>
+              </div>
+              <p>
+                <code>appsettings.Testing.json</code>
+                的结构已在上面的“准备”提示框中给出；它把全部三个分层都锁定到
+                Haiku，让每个关卡都保持低成本。
+              </p>
+            </li>
+
+            <li>
+              <h3>创建系统提示词（system prompt）常量</h3>
+              <p>
+                智能体需要两段文本：告诉它职责的系统提示词，以及被问到时可以返回的
+                schema 文档。两者放在同一个叶子文件里，方便后续课程扩展。
+              </p>
+              <p>
+                <code>Agents/Instructions.cs</code> 不依赖本课其他文件。<code
+                  >Instructions.System</code
+                >
+                由 <code>AgentFactory</code>（步骤 4）当作系统提示词读取，<code
+                  >Instructions.SchemaDoc</code
+                >
+                由 <code>SchemaTools.GetSchema</code>（步骤
+                3）返回给模型。现在先写骨架；完整 schema 在
+                <a href="../lesson08/index.html">C1</a> 补全，但 A1
+                要能编译，这个常量必须非空。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Agents/Instructions.cs (A1 skeleton)</span
+                  >
+                </div>
+                <pre class="code-block"><code>namespace AiAgent.Agents;
+
+public static class Instructions
+{
+    public const string SchemaDoc = """
+        # ClickHouse schema placeholder
+        Fill in with actual schema in C1 (lesson08).
+        """;
+
+    public const string System = $"""
+        You are the Claudalytics analyst. Answer questions about Claude Code
+        telemetry stored in ClickHouse.
+
+        {SchemaDoc}
+        """;
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>编写函数工具（function tool）</h3>
+              <p>
+                这个方法就是用来解决开头“模型编造列名”问题的。模型需要真实
+                schema 时就调用它，从而拿到真答案而不是靠猜。
+              </p>
+              <p>
+                <code>Tools/SchemaTools.cs</code> 持有 A1
+                中智能体唯一会调用的工具，只依赖
+                <code>Instructions.SchemaDoc</code>（步骤 2），由
+                <code>AgentFactory</code>（步骤 4）注册为工具。ClickHouse 查询在
+                <a href="../lesson04/index.html">B1</a> 才加入。工具就是带
+                <code>[Description]</code> 特性的普通 C#
+                实例方法，描述本身<em>就是</em>模型读取的工具
+                schema，所以要写清楚它返回什么、何时用它。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Tools/SchemaTools.cs</span>
+                </div>
+                <pre class="code-block"><code>using System.ComponentModel;
+using AiAgent.Agents;
+
+namespace AiAgent.Tools;
+
+public sealed class SchemaTools
+{
+    [Description("Returns the full ClickHouse schema reference: tables, columns, attribute extraction idioms and example queries.")]
+    public string GetSchema() =&gt; Instructions.SchemaDoc;
+}</code></pre>
+              </div>
+            </li>
+
+            <li>
+              <h3>接入 Anthropic 客户端并创建智能体（agent）</h3>
+              <p>
+                这一步把前面三个叶子文件组合成真正的智能体：注入
+                <code>SchemaTools</code>（步骤 3），从
+                <code>ModelTiers</code>（步骤 1）读取模型分层，并把
+                <code>Instructions.System</code>（步骤
+                2）作为系统提示词传入。<code>Program.cs</code>（步骤
+                5）在启动时调用这个工厂一次，构建出单例智能体。
+              </p>
+              <p>
+                工厂被精简到只满足 A1，后续逐步扩展：compaction 在
+                <a href="../lesson15/index.html">E2</a>、context provider 在
+                <a href="../lesson14/index.html">E1</a>、OTel middleware 在
+                <a href="../lesson03/index.html">A3</a>、agent-as-tool 在
+                <a href="../lesson16/index.html">F1</a
+                >。那时直接编辑此文件，不要重新生成。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename">Agents/AgentFactory.cs</span>
+                </div>
+                <pre class="code-block"><code>using AiAgent.Tools;
+using Anthropic;
+using Microsoft.Agents.AI;
+using Microsoft.Extensions.AI;
+
+namespace AiAgent.Agents;
+
+public static class AgentFactory
+{
+    public static AIAgent Create(
+        IConfiguration config,
+        SchemaTools tools,
+        ILoggerFactory loggerFactory)
+    {
+        var apiKey = config["ANTHROPIC_API_KEY"]
+            ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not set.");
+
+        IAnthropicClient client = new AnthropicClient { ApiKey = apiKey };
+
+        var options = new ChatClientAgentOptions
+        {
+            Name = "claudalytics-analyst",
+            Description = "Answers natural-language questions over Claudalytics telemetry in ClickHouse.",
+            ChatOptions = new ChatOptions
+            {
+                ModelId = ModelTiers.Analyst(config),
+                Instructions = Instructions.System,
+                Tools =
+                [
+                    AIFunctionFactory.Create(tools.GetSchema),
+                ],
+            },
+        };
+
+        return client.AsAIAgent(options, loggerFactory: loggerFactory);
+    }
+}</code></pre>
+              </div>
+              <p>
+                现在三个叶子文件都已就位 —— 粘贴完这一步后项目就能干净地构建。
+              </p>
+            </li>
+
+            <li>
+              <h3>注册智能体（agent）并暴露一个 /chat 端点（endpoint）</h3>
+              <p>
+                前几步的工厂和工具不运行起来就没用。<code>Program.cs</code> 把
+                <code>AIAgent</code> 注册为单例，并映射一个供调用者提问的 POST
+                端点。A1 端点保持最小：暂无会话存储（那是
+                <a href="../lesson02/index.html">A2</a>），也无流式（那是
+                <a href="../lesson03/index.html">A3</a>）。
+              </p>
+              <p>
+                先是 using 和 DI 注册，放在文件顶部和
+                <code>var app = builder.Build();</code> 之前。<code
+                  >AddSingleton&lt;AIAgent&gt;</code
+                >
+                从 DI 取出 <code>SchemaTools</code> 传给
+                <code>AgentFactory.Create</code>（步骤
+                4），智能体只构建一次并复用。<code
+                  >Microsoft.Extensions.AI</code
+                >
+                这个 using 用于下一块要读的 <code>FunctionCallContent</code>。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs (usings + DI — before builder.Build())</span
+                  >
+                </div>
+                <pre class="code-block"><code>using AiAgent.Agents;
+using AiAgent.Tools;
+using Microsoft.Agents.AI;
+using Microsoft.Extensions.AI;
+
+builder.Services.AddSingleton&lt;SchemaTools&gt;();
+builder.Services.AddSingleton&lt;AIAgent&gt;(sp =&gt; AgentFactory.Create(
+    sp.GetRequiredService&lt;IConfiguration&gt;(),
+    sp.GetRequiredService&lt;SchemaTools&gt;(),
+    sp.GetRequiredService&lt;ILoggerFactory&gt;()));
+
+var app = builder.Build();</code></pre>
+              </div>
+              <p>
+                接着是端点，放在
+                <code>var app = builder.Build();</code> 之后。它调用
+                <code>agent.RunAsync</code>
+                跑一次工具调用循环，返回两个字段：<code>answer</code>
+                是模型最终文本，<code>toolCalls</code>
+                是模型实际调用的工具列表（从
+                <code>response.Messages</code> 中筛出
+                <code>FunctionCallContent</code>）。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs (/chat — after builder.Build())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapPost("/chat", async (ChatRequest request, AIAgent agent, CancellationToken ct) =&gt;
+{
+    if (string.IsNullOrWhiteSpace(request.Message))
+        return Results.BadRequest(new { error = "message is required" });
+
+    var response = await agent.RunAsync(request.Message, cancellationToken: ct);
+    return Results.Ok(new
+    {
+        answer = response.Text,
+        toolCalls = response.Messages
+            .SelectMany(m =&gt; m.Contents)
+            .OfType&lt;FunctionCallContent&gt;()
+            .Select(c =&gt; new { name = c.Name }),
+    });
+});
+
+app.Run();</code></pre>
+              </div>
+              <p>
+                最后是请求类型。<code>ChatRequest</code> 是文件作用域
+                record，放在文件末尾 <code>app.Run();</code> 之后。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs (record — after app.Run())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>internal sealed record ChatRequest(string Message);</code></pre>
+              </div>
+              <p>
+                现在 <code>/chat</code> 已上线。<code>toolCalls</code> 字段就是
+                A1 的验证信号：答案自信但
+                <code>toolCalls</code>
+                为空，说明工具没注册，或描述太含糊让模型没选它。下面的验证关卡会检查这一点。
+              </p>
+            </li>
+
+            <li>
+              <h3>添加一个冒烟测试健康端点</h3>
+              <p>
+                信任
+                <code>/chat</code> 答案之前，先要有个便宜的方式确认模型可达、API
+                密钥有效。<code>/healthz/llm</code> 发一个极小的 prompt
+                并返回回复，这里失败就指向接线问题而非
+                prompt。下面的验证关卡会先调用它。
+              </p>
+              <p>
+                两个端点放在
+                <code>var app = builder.Build();</code> 之后，和步骤 5 的
+                <code>/chat</code> 一起。<code>/healthz</code>
+                是普通存活检查，<code>/healthz/llm</code>
+                是 LLM 冒烟测试。
+              </p>
+              <div class="codewrap">
+                <div class="code-meta">
+                  <span class="filename"
+                    >Program.cs (healthz — after builder.Build())</span
+                  >
+                </div>
+                <pre
+                  class="code-block"
+                ><code>app.MapGet("/healthz", () =&gt; Results.Ok(new { status = "ok" }));
+
+app.MapGet("/healthz/llm", async (AIAgent agent, CancellationToken ct) =&gt;
+{
+    var response = await agent.RunAsync("Reply with the single word: ok", cancellationToken: ct);
+    return Results.Ok(new { status = "ok", model_reply = response.Text });
+});</code></pre>
+              </div>
+            </li>
+          </ol>
+
+          <h2>为什么工具（tool）描述很重要</h2>
+          <p>
+            模型没有代码可供检查。它看到的只有工具（tool）名称和你写的描述。描述单薄时模型就会靠猜
+            ——
+            而且通常猜错。修复办法始终一样：让描述<em>精确</em>说明何时该用这个工具、它返回什么，而不只是它叫什么。
+          </p>
+          <p>
+            对比一下模型在精确描述与含糊描述下对
+            <code>GetSchema</code> 看到的内容：
+          </p>
+          <ul>
+            <li>
+              <strong>精确：</strong>
+              <em
+                >“Returns the full ClickHouse schema reference: tables, columns,
+                attribute extraction idioms and example queries.”</em
+              >
+              —— 模型知道在它需要编写或校验查询时就该调用这个工具（tool）。
+            </li>
+            <li>
+              <strong>含糊：</strong> <em>“Gets schema info.”</em> ——
+              模型分辨不出这是否与编写查询有关，于是跳过该工具（tool），转而用它自己（其实并不存在）的、关于你数据的“知识”来回答，结果就编造出根本不存在的列名。
+            </li>
+          </ul>
+          <p>
+            一个带有精确描述的工具（tool），比多个描述彼此重叠或单薄的工具更可靠。只有在用途确实各不相同时才添加工具
+            —— 并让每个描述都同时说清楚何时用它<em>以及</em>它返回什么。
+          </p>
+
+          <h2>验证</h2>
+          <div class="gate">
+            <p class="gate-title">✅ 关卡（gate） — 未变绿前不要前进</p>
+
+            <p><strong>第 1 步 — 环境检查。</strong>用这套仪式启动：</p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>dotnet run -- --environment Testing</code></pre>
+            </div>
+            <p>
+              确认控制台打印出
+              <code>Hosting environment: Testing</code
+              >。如果显示的是别的内容，停下来修正启动命令。
+            </p>
+
+            <p><strong>第 2 步 — 对 LLM 路径做冒烟测试：</strong></p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl http://localhost:8124/healthz/llm</code></pre>
+            </div>
+            <p>预期：<code>{"status":"ok","model_reply":"ok"}</code></p>
+
+            <p>
+              <strong
+                >第 3 步 — 提出一个需要用到
+                <code>GetSchema</code> 的问题：</strong
+              >
+            </p>
+            <div class="codewrap">
+              <pre
+                class="code-block"
+              ><code>curl -s -X POST http://localhost:8124/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "what tables are available in the schema?"}'</code></pre>
+            </div>
+            <p>
+              响应中的 <code>toolCalls</code> 数组必须
+              <strong>非空</strong>并包含 <code>get_schema</code>。
+              <code>answer</code> 必须描述 schema
+              的实际内容，而不是泛泛的占位符。
+            </p>
+
+            <p><strong>反向测试 —— 幻觉检查。</strong></p>
+            <p>
+              如果你得到一个自信的答案但
+              <code>toolCalls</code>
+              为空，说明模型是凭它自己的“知识”回答的（而它对你的 schema
+              一无所知）。这意味着工具（tool）没有被注册，或者它的描述太含糊。检查
+              <code>AIFunctionFactory.Create(tools.GetSchema)</code>
+              是否出现在你选项里的 <code>Tools</code> 数组中，以及该方法是否带有
+              <code>[Description]</code> 特性。
+            </p>
+          </div>
+
+          <div class="callout callout--pitfall">
+            <span class="callout-label">⚠️ 常见坑</span>
+            <ul>
+              <li>
+                <strong
+                  >控制台显示
+                  <code>Hosting environment: Production</code></strong
+                >
+                → 缺少 <code>--</code> 分隔符。要运行
+                <code>dotnet run -- --environment Testing</code>，而不是
+                <code>dotnet run --environment Testing</code
+                >。没有分隔符时，dotnet 会把
+                <code>--environment</code> 当成它自己的标志，并悄悄丢弃掉。
+              </li>
+              <li>
+                <strong>答案非空，但 <code>toolCalls</code> 为空</strong>
+                → 工具（tool）没有注册。该方法必须通过
+                <code>AIFunctionFactory.Create</code> 出现在
+                <code>ChatOptions.Tools</code> 中。检查
+                <code>AgentFactory.cs</code>
+                里的那个数组；缺一项不会产生编译错误，也没有运行时警告 ——
+                只会得到一个在产生幻觉的模型。
+              </li>
+              <li>
+                <strong>模型跳过工具，凭自己的知识作答</strong>
+                →
+                <code>[Description]</code>
+                特性太含糊。模型分辨不出该工具（tool）何时相关，于是不调用它就开始猜。把描述重写成精确说明工具返回什么、何时使用。
+              </li>
+              <li>
+                <strong
+                  >启动时报 <code>ANTHROPIC_API_KEY is not set</code></strong
+                >
+                → 密钥不在
+                <code>appsettings.Local.json</code>（那个被 git
+                忽略的文件）里。永远不要提交密钥；Local
+                文件最后被加载，会覆盖其他一切。
+              </li>
+              <li>
+                <strong
+                  >工具（tool）方法抛出异常，而不是返回一个错误字符串</strong
+                >
+                → 工具抛出的未处理异常会让
+                <code>RunAsync</code>
+                调用以异常告终，而不是返回一条模型可读的消息。务必捕获异常并返回
+                <code>"QUERY FAILED: {ex.Message}"</code
+                >，这样模型才能对失败进行推理。
+              </li>
+            </ul>
+          </div>
+
+          <!-- CONTENT END -->
+
+          <div class="complete-bar">
+            <button class="complete-toggle" id="complete-toggle">
+              标记本课完成
+            </button>
+          </div>
+          <nav class="prevnext" id="prevnext"></nav>
+        </div>
+      </main>
+
+      <aside class="toc" id="toc"></aside>
+    </div>
+
+    <script src="../assets/manifest.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>
