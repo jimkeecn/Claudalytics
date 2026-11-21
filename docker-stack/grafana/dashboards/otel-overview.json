@@ -1,10 +1,7 @@
 {
   "uid": "claude-otel-overview",
   "title": "Claudalytics - OTel Overview",
-  "tags": [
-    "claudalytics",
-    "otel"
-  ],
+  "tags": ["claudalytics", "otel"],
   "refresh": "30s",
   "time": {
     "from": "now-24h",
@@ -12,7 +9,7 @@
   },
   "timepicker": {},
   "schemaVersion": 39,
-  "version": 6,
+  "version": 7,
   "templating": {
     "list": [
       {
@@ -23,7 +20,7 @@
           "type": "grafana-clickhouse-datasource",
           "uid": "clickhouse-claudalytics"
         },
-        "query": "SELECT DISTINCT project_name FROM claudalytics.sessions FINAL ORDER BY project_name",
+        "query": "SELECT DISTINCT project_name FROM claudalytics.sessions ORDER BY project_name",
         "includeAll": true,
         "multi": true,
         "refresh": 2,
@@ -42,7 +39,7 @@
           "type": "grafana-clickhouse-datasource",
           "uid": "clickhouse-claudalytics"
         },
-        "query": "SELECT session_id, concat(formatDateTime(max(last_event_at), '%Y-%m-%d %H:%i', '${__timezone}'), '  ·  ', substring(session_id, 1, 8)) AS label FROM claudalytics.sessions FINAL WHERE $__conditionalAll(project_name IN (${project:singlequote}), $project) GROUP BY session_id ORDER BY max(last_event_at) DESC",
+        "query": "SELECT session_id, concat(formatDateTime(max(last_event_at), '%Y-%m-%d %H:%i', '${__timezone}'), '  ·  ', substring(session_id, 1, 8)) AS label FROM claudalytics.sessions WHERE $__conditionalAll(project_name IN (${project:singlequote}), $project) GROUP BY session_id ORDER BY max(last_event_at) DESC",
         "includeAll": true,
         "multi": true,
         "refresh": 2,
@@ -51,6 +48,32 @@
           "selected": true,
           "text": "All",
           "value": "$__all"
+        }
+      },
+      {
+        "name": "show_startup",
+        "label": "Startup events",
+        "description": "Show plugin_loaded, hook_registered, mcp_server_connection and managed_settings_resolved rows in Session History",
+        "type": "custom",
+        "query": "Hide : 0,Show : 1",
+        "includeAll": false,
+        "multi": false,
+        "options": [
+          {
+            "selected": true,
+            "text": "Hide",
+            "value": "0"
+          },
+          {
+            "selected": false,
+            "text": "Show",
+            "value": "1"
+          }
+        ],
+        "current": {
+          "selected": true,
+          "text": "Hide",
+          "value": "0"
         }
       }
     ]
@@ -73,16 +96,14 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT count(DISTINCT session_id) AS sessions FROM claudalytics.sessions FINAL WHERE $__conditionalAll(project_name IN (${project:singlequote}), $project)",
+          "rawSql": "SELECT uniqExact(LogAttributes['session.id']) AS sessions FROM claudalytics.otel_logs WHERE LogAttributes['event.name'] IN ('user_prompt', 'api_request') AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session)",
           "format": 1,
           "queryType": "sql"
         }
       ],
       "options": {
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
+          "calcs": ["lastNotNull"]
         },
         "orientation": "auto",
         "textMode": "auto",
@@ -123,16 +144,14 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT count() AS events FROM claudalytics.otel_logs WHERE $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session)",
+          "rawSql": "SELECT count() AS events FROM claudalytics.otel_logs WHERE $__timeFilter(Timestamp) AND NOT startsWith(LogAttributes['event.name'], 'hooks.') AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session)",
           "format": 1,
           "queryType": "sql"
         }
       ],
       "options": {
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
+          "calcs": ["lastNotNull"]
         },
         "orientation": "auto",
         "textMode": "auto",
@@ -154,7 +173,8 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Claude Code's own OTel events. Hook rows (hooks.*) are not counted, so the number is the same in OTel-only and OTel + hooks mode."
     },
     {
       "id": 27,
@@ -181,9 +201,7 @@
       ],
       "options": {
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
+          "calcs": ["lastNotNull"]
         },
         "orientation": "auto",
         "textMode": "auto",
@@ -227,7 +245,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT $__timeInterval(Timestamp) AS time, count() AS events FROM claudalytics.otel_logs WHERE $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY time ORDER BY time",
+          "rawSql": "SELECT $__timeInterval(Timestamp) AS time, count() AS events FROM claudalytics.otel_logs WHERE $__timeFilter(Timestamp) AND NOT startsWith(LogAttributes['event.name'], 'hooks.') AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY time ORDER BY time",
           "format": 2,
           "queryType": "sql"
         }
@@ -252,7 +270,8 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Claude Code's own OTel events. Hook rows (hooks.*) are not counted, so the number is the same in OTel-only and OTel + hooks mode."
     },
     {
       "id": 5,
@@ -271,7 +290,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT LogAttributes['model'] AS model, count() AS count FROM claudalytics.otel_logs WHERE $__timeFilter(Timestamp) AND LogAttributes['model'] != '' AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY model ORDER BY count DESC",
+          "rawSql": "SELECT LogAttributes['model'] AS model, count() AS count FROM claudalytics.otel_logs WHERE $__timeFilter(Timestamp) AND LogAttributes['event.name'] = 'api_request' AND LogAttributes['model'] != '' AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY model ORDER BY count DESC",
           "format": 1,
           "queryType": "sql"
         }
@@ -300,7 +319,8 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "API requests per model (api_request events only)."
     },
     {
       "id": 6,
@@ -364,7 +384,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT LogAttributes['tool_name'] AS tool_name, count() AS calls, countIf(LogAttributes['success'] = 'true') AS successes, countIf(LogAttributes['success'] != 'true') AS failures, round(countIf(LogAttributes['success'] = 'true') / count() * 100, 1) AS success_rate FROM claudalytics.otel_logs WHERE $__timeFilter(Timestamp) AND LogAttributes['tool_name'] != '' AND LogAttributes['event.name'] = 'tool_result' AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY tool_name ORDER BY calls DESC",
+          "rawSql": "SELECT LogAttributes['tool_name'] AS tool_name, count() AS calls, countIf(LogAttributes['success'] = 'true') AS successes, countIf(LogAttributes['success'] != 'true') AS failures, round(countIf(LogAttributes['success'] = 'true') / count() * 100, 1) AS success_rate FROM claudalytics.otel_logs WHERE $__timeFilter(Timestamp) AND LogAttributes['tool_name'] NOT IN ('', 'SubagentHandback') AND LogAttributes['event.name'] = 'tool_result' AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY tool_name ORDER BY calls DESC",
           "format": 1,
           "queryType": "sql"
         }
@@ -491,7 +511,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT JSONExtractString(LogAttributes['tool_input'], 'skill') AS skill_name, count() AS calls, countIf(LogAttributes['success'] = 'true') AS successes, countIf(LogAttributes['success'] != 'true') AS failures, round(countIf(LogAttributes['success'] = 'true') / count() * 100, 1) AS success_rate, round(avg(toFloat64OrZero(LogAttributes['duration_ms'])), 0) AS avg_duration_ms, sum(toUInt64OrZero(LogAttributes['tool_result_size_bytes'])) AS total_result_bytes FROM claudalytics.otel_logs WHERE $__timeFilter(Timestamp) AND LogAttributes['tool_name'] = 'Skill' AND LogAttributes['event.name'] = 'tool_result' AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY skill_name ORDER BY calls DESC",
+          "rawSql": "SELECT LogAttributes['skill.name'] AS skill_name, count() AS calls, countIf(LogAttributes['invocation_trigger'] = 'user-slash') AS user_slash, countIf(LogAttributes['invocation_trigger'] = 'nested-skill') AS nested, countIf(LogAttributes['invocation_trigger'] NOT IN ('user-slash', 'nested-skill')) AS other, max(Timestamp) AS last_used FROM claudalytics.otel_logs WHERE $__timeFilter(Timestamp) AND Body = 'claude_code.skill_activated' AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY skill_name ORDER BY calls DESC",
           "format": 1,
           "queryType": "sql"
         }
@@ -519,60 +539,83 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "success_rate"
+              "options": "last_used"
             },
             "properties": [
               {
                 "id": "unit",
-                "value": "percent"
-              },
-              {
-                "id": "custom.displayMode",
-                "value": "color-background"
-              },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "red",
-                      "value": null
-                    },
-                    {
-                      "color": "yellow",
-                      "value": 80
-                    },
-                    {
-                      "color": "green",
-                      "value": 95
-                    }
-                  ]
-                }
+                "value": "dateTimeAsIso"
               }
             ]
           },
           {
             "matcher": {
               "id": "byName",
-              "options": "avg_duration_ms"
+              "options": "skill_name"
             },
             "properties": [
               {
-                "id": "unit",
-                "value": "ms"
+                "id": "custom.minWidth",
+                "value": 220
               }
             ]
-          },
+          }
+        ]
+      }
+    },
+    {
+      "id": 29,
+      "title": "Memory Files",
+      "description": "Auto-memory file writes (Write/Edit) into user-project memory folders (~/.claude/projects/<proj>/memory/). Sourced from file_mutations. Note: memory recall/load is not observable — writes only.",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 92,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-claudalytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT project_name AS project, file_name AS file, action, count() AS writes, max(timestamp) AS last_written FROM claudalytics.file_mutations WHERE $__timeFilter(toDateTime(timestamp)) AND positionCaseInsensitive(directory, '.claude/projects/') > 0 AND positionCaseInsensitive(directory, '/memory') > 0 AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) GROUP BY project, file, action ORDER BY last_written DESC LIMIT 200",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "last_written",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": [
           {
             "matcher": {
               "id": "byName",
-              "options": "total_result_bytes"
+              "options": "last_written"
             },
             "properties": [
               {
                 "id": "unit",
-                "value": "decbytes"
+                "value": "dateTimeAsIso"
               }
             ]
           }
@@ -582,7 +625,7 @@
     {
       "id": 10,
       "title": "Websites Visited [KAN-39]",
-      "description": "URLs visited via WebFetch, WebSearch, and Bash commands. Powered by websites_visited MVs — no JSON parsing or UNION at query time.",
+      "description": "URLs from WebFetch, Bash and PowerShell commands and MCP page fetches, and WebSearch queries (OTel). WebSearch result URLs need OTel + hooks mode. Status and bytes exist only in rows written by hooks before the upgrade. source says what wrote the row: otel (Claude Code's own telemetry) or hook (the hook-capture plugin). It is empty on rows from before schema v7. A WebSearch call gives one otel row with the query and one hook row for each result URL.",
       "type": "table",
       "gridPos": {
         "x": 8,
@@ -597,7 +640,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT source_tool AS tool, timestamp AS time, url, http_status AS status, fetch_bytes AS bytes, domain FROM claudalytics.websites_visited WHERE $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) ORDER BY time DESC LIMIT 200",
+          "rawSql": "SELECT source_tool AS tool, source, timestamp AS time, url, search_query AS query, http_status AS status, fetch_bytes AS bytes, domain FROM claudalytics.websites_visited WHERE $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) ORDER BY time DESC LIMIT 200",
           "format": 1,
           "queryType": "sql"
         }
@@ -674,6 +717,18 @@
               {
                 "id": "unit",
                 "value": "decbytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "url"
+            },
+            "properties": [
+              {
+                "id": "custom.minWidth",
+                "value": 350
               }
             ]
           }
@@ -802,7 +857,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT LogAttributes['tool_name'] AS tool, concat(LogAttributes['source'], ':', LogAttributes['decision']) AS src_decision, count() AS n FROM claudalytics.otel_logs WHERE LogAttributes['event.name'] = 'tool_decision' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY tool, src_decision ORDER BY n DESC",
+          "rawSql": "SELECT LogAttributes['tool_name'] AS tool, concat(LogAttributes['source'], ':', LogAttributes['decision']) AS src_decision, count() AS n FROM claudalytics.otel_logs WHERE LogAttributes['event.name'] = 'tool_decision' AND LogAttributes['tool_name'] != 'SubagentHandback' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY tool, src_decision ORDER BY n DESC",
           "format": 1,
           "queryType": "sql"
         }
@@ -846,7 +901,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT $__timeInterval(Timestamp) AS time, sum(toUInt64OrZero(LogAttributes['cache_read_tokens'])) / greatest(sum(toUInt64OrZero(LogAttributes['cache_read_tokens'])) + sum(toUInt64OrZero(LogAttributes['input_tokens'])), 1) AS hit_rate FROM claudalytics.otel_logs WHERE LogAttributes['event.name'] = 'api_request' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY time ORDER BY time",
+          "rawSql": "SELECT $__timeInterval(Timestamp) AS time, sum(toUInt64OrZero(LogAttributes['cache_read_tokens'])) / greatest(sum(toUInt64OrZero(LogAttributes['cache_read_tokens'])) + sum(toUInt64OrZero(LogAttributes['cache_creation_tokens'])) + sum(toUInt64OrZero(LogAttributes['input_tokens'])), 1) AS hit_rate FROM claudalytics.otel_logs WHERE LogAttributes['event.name'] = 'api_request' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY time ORDER BY time",
           "format": 2,
           "queryType": "sql"
         }
@@ -910,7 +965,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT $__timeInterval(Timestamp) AS time, quantileIf(0.50)(toUInt32OrZero(LogAttributes['duration_ms']), LogAttributes['model']='claude-opus-4-6') AS \"opus p50\", quantileIf(0.95)(toUInt32OrZero(LogAttributes['duration_ms']), LogAttributes['model']='claude-opus-4-6') AS \"opus p95\", quantileIf(0.99)(toUInt32OrZero(LogAttributes['duration_ms']), LogAttributes['model']='claude-opus-4-6') AS \"opus p99\", quantileIf(0.50)(toUInt32OrZero(LogAttributes['duration_ms']), LogAttributes['model']='claude-haiku-4-5-20251001') AS \"haiku p50\", quantileIf(0.95)(toUInt32OrZero(LogAttributes['duration_ms']), LogAttributes['model']='claude-haiku-4-5-20251001') AS \"haiku p95\", quantileIf(0.99)(toUInt32OrZero(LogAttributes['duration_ms']), LogAttributes['model']='claude-haiku-4-5-20251001') AS \"haiku p99\" FROM claudalytics.otel_logs WHERE LogAttributes['event.name'] = 'api_request' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY time ORDER BY time",
+          "rawSql": "SELECT $__timeInterval(Timestamp) AS time, LogAttributes['model'] AS model, quantile(0.50)(toUInt32OrZero(LogAttributes['duration_ms'])) AS p50, quantile(0.95)(toUInt32OrZero(LogAttributes['duration_ms'])) AS p95, quantile(0.99)(toUInt32OrZero(LogAttributes['duration_ms'])) AS p99 FROM claudalytics.otel_logs WHERE LogAttributes['event.name'] = 'api_request' AND LogAttributes['model'] != '' AND LogAttributes['duration_ms'] != '' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY time, model ORDER BY time, model",
           "format": 2,
           "queryType": "sql"
         }
@@ -955,7 +1010,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT LogAttributes['tool_name'] AS tool, count() AS invocations, round(quantile(0.50)(toUInt32OrZero(LogAttributes['duration_ms'])), 0) AS p50_ms, round(quantile(0.95)(toUInt32OrZero(LogAttributes['duration_ms'])), 0) AS p95_ms, max(toUInt32OrZero(LogAttributes['duration_ms'])) AS max_ms FROM claudalytics.otel_logs WHERE LogAttributes['event.name'] = 'tool_result' AND LogAttributes['tool_name'] != '' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY tool ORDER BY p95_ms DESC",
+          "rawSql": "SELECT LogAttributes['tool_name'] AS tool, count() AS invocations, round(quantile(0.50)(toUInt32OrZero(LogAttributes['duration_ms'])), 0) AS p50_ms, round(quantile(0.95)(toUInt32OrZero(LogAttributes['duration_ms'])), 0) AS p95_ms, max(toUInt32OrZero(LogAttributes['duration_ms'])) AS max_ms FROM claudalytics.otel_logs WHERE LogAttributes['event.name'] = 'tool_result' AND LogAttributes['tool_name'] NOT IN ('', 'SubagentHandback') AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY tool ORDER BY p95_ms DESC",
           "format": 1,
           "queryType": "sql"
         }
@@ -1097,6 +1152,18 @@
                 "value": "ms"
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "url"
+            },
+            "properties": [
+              {
+                "id": "custom.minWidth",
+                "value": 350
+              }
+            ]
           }
         ]
       }
@@ -1162,7 +1229,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT toString(floor(toUInt32OrZero(LogAttributes['prompt_length']) / 100) * 100) AS bucket_chars, count() AS prompts FROM claudalytics.otel_logs WHERE LogAttributes['event.name'] = 'user_prompt' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY bucket_chars ORDER BY toUInt32OrZero(bucket_chars)",
+          "rawSql": "SELECT toString(floor(toUInt32OrZero(LogAttributes['prompt_length']) / 100) * 100) AS bucket_chars, count() AS prompts FROM claudalytics.otel_logs WHERE LogAttributes['event.name'] = 'user_prompt' AND LogAttributes['delivery.mode'] != 'mid_turn' AND NOT startsWith(LogAttributes['prompt'], '<agent-message') AND NOT startsWith(LogAttributes['prompt'], '<task-notification') AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY bucket_chars ORDER BY toUInt32OrZero(bucket_chars)",
           "format": 1,
           "queryType": "sql"
         }
@@ -1187,7 +1254,8 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Length of the prompt that starts each turn. Messages sent while Claude works (delivery.mode = mid_turn) are not counted."
     },
     {
       "id": 20,
@@ -1246,6 +1314,18 @@
                 "value": 4
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "session_id"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 310
+              }
+            ]
           }
         ]
       }
@@ -1267,7 +1347,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "WITH prompt_texts AS (SELECT LogAttributes['prompt.id'] AS pid, any(LogAttributes['session.id']) AS session_id, any(LogAttributes['prompt']) AS prompt_text FROM claudalytics.otel_logs WHERE LogAttributes['event.name'] = 'user_prompt' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY pid) SELECT substring(pt.session_id, 1, 8) AS session, substring(pt.prompt_text, 1, 120) AS prompt, any(l.LogAttributes['user.email']) AS user, count() AS api_calls, round(sum(toFloat64OrZero(l.LogAttributes['cost_usd'])), 4) AS cost_usd, sum(toUInt64OrZero(l.LogAttributes['input_tokens']) + toUInt64OrZero(l.LogAttributes['output_tokens'])) AS tokens FROM claudalytics.otel_logs l LEFT JOIN prompt_texts pt ON l.LogAttributes['prompt.id'] = pt.pid WHERE l.LogAttributes['event.name'] = 'api_request' AND l.LogAttributes['prompt.id'] != '' AND $__timeFilter(l.Timestamp) AND $__conditionalAll(l.ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(l.LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY session, prompt ORDER BY cost_usd DESC LIMIT 20",
+          "rawSql": "WITH prompt_texts AS (SELECT LogAttributes['prompt.id'] AS pid, any(LogAttributes['session.id']) AS session_id, argMin(LogAttributes['prompt'], Timestamp) AS prompt_text FROM claudalytics.otel_logs WHERE LogAttributes['event.name'] = 'user_prompt' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY pid) SELECT any(pt.prompt_text) AS prompt, substring(any(pt.session_id), 1, 8) AS session, any(l.LogAttributes['user.email']) AS user, count() AS api_calls, round(sum(toFloat64OrZero(l.LogAttributes['cost_usd'])), 4) AS cost_usd, sum(toUInt64OrZero(l.LogAttributes['input_tokens']) + toUInt64OrZero(l.LogAttributes['output_tokens'])) AS tokens FROM claudalytics.otel_logs l LEFT JOIN prompt_texts pt ON l.LogAttributes['prompt.id'] = pt.pid WHERE l.LogAttributes['event.name'] = 'api_request' AND l.LogAttributes['prompt.id'] != '' AND NOT startsWith(pt.prompt_text, '<agent-message') AND NOT startsWith(pt.prompt_text, '<task-notification') AND $__timeFilter(l.Timestamp) AND $__conditionalAll(l.ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(l.LogAttributes['session.id'] IN (${session:singlequote}), $session) GROUP BY pt.pid ORDER BY cost_usd DESC LIMIT 20",
           "format": 1,
           "queryType": "sql"
         }
@@ -1306,6 +1386,30 @@
               {
                 "id": "decimals",
                 "value": 4
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "prompt"
+            },
+            "properties": [
+              {
+                "id": "custom.minWidth",
+                "value": 400
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "session"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
               }
             ]
           }
@@ -1361,6 +1465,7 @@
     {
       "id": 24,
       "title": "Commits vs Cost per Day [KAN-31]",
+      "description": "Commits come from Claude Code's claude_code.commit.count metric. It also counts a Bash command that only holds the text \"git commit\" (a heredoc, a search), so the number can be higher than the real commits.",
       "type": "timeseries",
       "gridPos": {
         "x": 12,
@@ -1438,7 +1543,7 @@
     {
       "id": 26,
       "title": "Session History [KAN-50]",
-      "description": "Merged timeline from OTel (prompts, API calls) and Hooks (tools, subagents, tasks, permissions, errors). Filter by actor/kind column headers. Subagent internal tools prefixed with ↳.",
+      "description": "Timeline of a session from Claude Code's OTel events: prompts (mid-turn messages marked), responses, API calls, tool decisions and results, subagents. Hook rows show only for what OTel cannot give: session start/end, config, cwd, instructions, notifications, subagent start, elicitation, teammate idle and WebSearch result URLs (OTel + hooks mode). Older hook rows that repeat OTel data show only for sessions recorded without OTel. Subagent tool calls are prefixed with ↳. source says what wrote the row: otel (Claude Code's own telemetry), hook (the hook-capture plugin) or transcript_backfill. It is empty on rows from before this label existed. One tool call can show as an otel row and a hook row; no row is left out. A hook row stores the subagent id as agent_id, like an OTel row; hook rows from before that stored it as agent.id, and this table reads both.",
       "type": "table",
       "gridPos": {
         "x": 0,
@@ -1453,7 +1558,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT Timestamp AS time, LogAttributes['event.name'] AS event, multiIf(LogAttributes['event.name'] IN ('user_prompt', 'hooks.UserPromptSubmit', 'hooks.PermissionRequest', 'hooks.PermissionDenied', 'hooks.Elicitation', 'hooks.ElicitationResult', 'feedback_survey'), 'user', LogAttributes['event.name'] IN ('api_request', 'api_error', 'hooks.Stop', 'hooks.StopFailure'), 'assistant', LogAttributes['event.name'] IN ('hooks.SubagentStart', 'hooks.SubagentStop', 'hooks.TeammateIdle'), 'agent', LogAttributes['event.name'] IN ('tool_result', 'tool_decision', 'hooks.PreToolUse', 'hooks.PostToolUse', 'hooks.PostToolUseFailure'), 'tool', LogAttributes['event.name'] IN ('hooks.SessionStart', 'hooks.SessionEnd', 'hooks.Notification', 'hooks.InstructionsLoaded', 'hooks.TaskCreated', 'hooks.TaskCompleted', 'hooks.ConfigChange', 'hooks.CwdChanged', 'hooks.FileChanged', 'hooks.WorktreeCreate', 'hooks.WorktreeRemove', 'hooks.PreCompact', 'hooks.PostCompact', 'skill_activated', 'hook_execution_start', 'hook_execution_complete', 'internal_error', 'mcp_server_connection', 'compaction', 'plugin_installed', 'permission_mode_changed'), 'system', 'other') AS actor, multiIf(LogAttributes['event.name'] = 'user_prompt', 'prompt', LogAttributes['event.name'] = 'hooks.UserPromptSubmit', 'prompt submit', LogAttributes['event.name'] = 'api_request', 'api_call', LogAttributes['event.name'] = 'api_error', 'api_error', LogAttributes['event.name'] = 'tool_result', concat(LogAttributes['tool_name'], ' result'), LogAttributes['event.name'] = 'tool_decision', concat(LogAttributes['tool_name'], ' decision'), LogAttributes['event.name'] = 'feedback_survey', 'feedback', LogAttributes['event.name'] = 'skill_activated', 'skill', LogAttributes['event.name'] = 'hooks.PreToolUse' AND LogAttributes['agent.id'] != '', concat('↳ ', LogAttributes['tool_name'], ' pre'), LogAttributes['event.name'] = 'hooks.PreToolUse', concat(LogAttributes['tool_name'], ' pre'), LogAttributes['event.name'] = 'hooks.PostToolUse' AND LogAttributes['agent.id'] != '', concat('↳ ', LogAttributes['tool_name']), LogAttributes['event.name'] = 'hooks.PostToolUse', LogAttributes['tool_name'], LogAttributes['event.name'] = 'hooks.PostToolUseFailure' AND LogAttributes['agent.id'] != '', concat('↳ ', LogAttributes['tool_name'], ' FAIL'), LogAttributes['event.name'] = 'hooks.PostToolUseFailure', concat(LogAttributes['tool_name'], ' FAIL'), LogAttributes['event.name'] = 'hooks.SubagentStart', concat(LogAttributes['agent.type'], ' start'), LogAttributes['event.name'] = 'hooks.SubagentStop', concat(LogAttributes['agent.type'], ' stop'), LogAttributes['event.name'] = 'hooks.TeammateIdle', 'teammate idle', LogAttributes['event.name'] = 'hooks.TaskCreated', 'task created', LogAttributes['event.name'] = 'hooks.TaskCompleted', 'task done', LogAttributes['event.name'] = 'hooks.InstructionsLoaded', 'instructions', LogAttributes['event.name'] = 'hooks.PermissionRequest', 'permission', LogAttributes['event.name'] = 'hooks.PermissionDenied', 'permission denied', LogAttributes['event.name'] = 'hooks.Notification', 'notification', LogAttributes['event.name'] = 'hooks.SessionStart', 'session start', LogAttributes['event.name'] = 'hooks.SessionEnd', 'session end', LogAttributes['event.name'] = 'hooks.Stop', 'stop', LogAttributes['event.name'] = 'hooks.StopFailure', 'stop fail', LogAttributes['event.name'] = 'hooks.ConfigChange', 'config', LogAttributes['event.name'] = 'hooks.CwdChanged', 'cwd changed', LogAttributes['event.name'] = 'hooks.FileChanged', 'file changed', LogAttributes['event.name'] = 'hooks.WorktreeCreate', 'worktree create', LogAttributes['event.name'] = 'hooks.WorktreeRemove', 'worktree remove', LogAttributes['event.name'] = 'hooks.PreCompact', 'pre compact', LogAttributes['event.name'] = 'hooks.PostCompact', 'post compact', LogAttributes['event.name'] = 'hooks.Elicitation', 'elicitation', LogAttributes['event.name'] = 'hooks.ElicitationResult', 'elicitation result', LogAttributes['event.name'] = 'hook_execution_start', concat('⚙ ', LogAttributes['hook_event'], ' start'), LogAttributes['event.name'] = 'hook_execution_complete', concat('⚙ ', LogAttributes['hook_event'], ' done'), LogAttributes['event.name'] = 'internal_error', 'internal error', LogAttributes['event.name'] = 'mcp_server_connection', 'mcp connect', LogAttributes['event.name'] = 'compaction', 'compaction', LogAttributes['event.name'] = 'plugin_installed', 'plugin install', LogAttributes['event.name'] = 'permission_mode_changed', 'perm mode', '?') AS kind, multiIf(LogAttributes['event.name'] = 'user_prompt', substring(LogAttributes['prompt'], 1, 200), LogAttributes['event.name'] = 'hooks.UserPromptSubmit', substring(LogAttributes['prompt'], 1, 200), LogAttributes['event.name'] = 'api_request', concat(LogAttributes['model'], ' · ', LogAttributes['duration_ms'], 'ms · ', LogAttributes['input_tokens'], '+', LogAttributes['output_tokens'], 'tok · $', substring(LogAttributes['cost_usd'], 1, 7)), LogAttributes['event.name'] = 'api_error', LogAttributes['error'], LogAttributes['event.name'] = 'tool_result', concat(LogAttributes['duration_ms'], 'ms · success=', LogAttributes['success'], ' · ', LogAttributes['tool_result_size_bytes'], 'B'), LogAttributes['event.name'] = 'tool_decision', concat(LogAttributes['decision'], ' (', LogAttributes['source'], ')'), LogAttributes['event.name'] = 'skill_activated', LogAttributes['skill_name'], LogAttributes['event.name'] = 'feedback_survey', LogAttributes['rating'], LogAttributes['event.name'] = 'hooks.PreToolUse', substring(LogAttributes['tool_input'], 1, 140), LogAttributes['event.name'] = 'hooks.PostToolUse', substring(LogAttributes['tool_input'], 1, 140), LogAttributes['event.name'] = 'hooks.PostToolUseFailure', LogAttributes['error'], LogAttributes['event.name'] = 'hooks.SubagentStart', LogAttributes['agent.id'], LogAttributes['event.name'] = 'hooks.SubagentStop', substring(LogAttributes['agent.last_message'], 1, 140), LogAttributes['event.name'] = 'hooks.TeammateIdle', LogAttributes['teammate.name'], LogAttributes['event.name'] = 'hooks.TaskCreated', LogAttributes['task.subject'], LogAttributes['event.name'] = 'hooks.TaskCompleted', LogAttributes['task.subject'], LogAttributes['event.name'] = 'hooks.InstructionsLoaded', concat(LogAttributes['memory_type'], ': ', LogAttributes['file_path']), LogAttributes['event.name'] = 'hooks.PermissionRequest', concat(LogAttributes['tool_name'], ' — ', substring(LogAttributes['tool_input'], 1, 120)), LogAttributes['event.name'] = 'hooks.PermissionDenied', concat(LogAttributes['tool_name'], ' — ', LogAttributes['reason']), LogAttributes['event.name'] = 'hooks.Notification', concat(LogAttributes['notification_type'], ': ', LogAttributes['message']), LogAttributes['event.name'] = 'hooks.SessionStart', concat(LogAttributes['source'], ' · ', LogAttributes['model']), LogAttributes['event.name'] = 'hooks.SessionEnd', LogAttributes['reason'], LogAttributes['event.name'] = 'hooks.Stop', substring(LogAttributes['last_assistant_message'], 1, 140), LogAttributes['event.name'] = 'hooks.StopFailure', LogAttributes['error'], LogAttributes['event.name'] = 'hooks.ConfigChange', concat(LogAttributes['source'], ': ', LogAttributes['file_path']), LogAttributes['event.name'] = 'hooks.CwdChanged', concat(LogAttributes['old_cwd'], ' → ', LogAttributes['new_cwd']), LogAttributes['event.name'] = 'hooks.FileChanged', concat(LogAttributes['event'], ': ', LogAttributes['file_path']), LogAttributes['event.name'] IN ('hooks.WorktreeCreate', 'hooks.WorktreeRemove'), LogAttributes['worktree.path'], LogAttributes['event.name'] = 'hooks.PreCompact', concat(LogAttributes['trigger'], ' · ', LogAttributes['custom_instructions']), LogAttributes['event.name'] = 'hooks.PostCompact', concat(LogAttributes['trigger'], ' · ', LogAttributes['compact_summary']), LogAttributes['event.name'] = 'hooks.Elicitation', concat(LogAttributes['mcp_server_name'], ': ', LogAttributes['message']), LogAttributes['event.name'] = 'hooks.ElicitationResult', concat(LogAttributes['mcp_server_name'], ': ', LogAttributes['action']), LogAttributes['event.name'] = 'hook_execution_start', concat(LogAttributes['hook_event'], ' (', LogAttributes['num_hooks'], ' hooks)'), LogAttributes['event.name'] = 'hook_execution_complete', concat(LogAttributes['hook_event'], ' · ', LogAttributes['total_duration_ms'], 'ms · ', LogAttributes['num_success'], ' ok'), LogAttributes['event.name'] = 'internal_error', concat(LogAttributes['error_name'], ': ', LogAttributes['error_code']), LogAttributes['event.name'] = 'mcp_server_connection', concat(LogAttributes['server_name'], ' ', LogAttributes['status'], ' · ', LogAttributes['transport_type']), LogAttributes['event.name'] = 'compaction', concat(LogAttributes['trigger'], ' · ', LogAttributes['pre_tokens'], ' → ', LogAttributes['post_tokens'], 'tok'), LogAttributes['event.name'] = 'plugin_installed', concat(LogAttributes['plugin.name'], '@', LogAttributes['plugin.version']), LogAttributes['event.name'] = 'permission_mode_changed', concat(LogAttributes['from_mode'], ' → ', LogAttributes['to_mode']), '?') AS detail FROM claudalytics.otel_logs WHERE $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND ($__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session)) AND LogAttributes['event.name'] NOT IN ('hook_execution_start', 'hook_execution_complete', 'user_prompt') ORDER BY time LIMIT 2000",
+          "rawSql": "SELECT Timestamp AS time, LogAttributes['event.name'] AS event, LogAttributes['event.source'] AS source, multiIf(LogAttributes['event.name'] IN ('user_prompt', 'hooks.UserPromptSubmit', 'hooks.PermissionRequest', 'hooks.PermissionDenied', 'hooks.Elicitation', 'hooks.ElicitationResult', 'feedback_survey', 'at_mention', 'auth'), 'user', LogAttributes['event.name'] IN ('api_request', 'api_error', 'api_refusal', 'api_retries_exhausted', 'assistant_response', 'hooks.Stop', 'hooks.StopFailure', 'api_request_body', 'api_response_body'), 'assistant', LogAttributes['event.name'] IN ('hooks.SubagentStart', 'hooks.SubagentStop', 'hooks.TeammateIdle', 'subagent_completed'), 'agent', LogAttributes['event.name'] IN ('tool_result', 'tool_decision', 'hooks.PreToolUse', 'hooks.PostToolUse', 'hooks.PostToolUseFailure'), 'tool', LogAttributes['event.name'] IN ('hooks.SessionStart', 'hooks.SessionEnd', 'hooks.Notification', 'hooks.InstructionsLoaded', 'hooks.TaskCreated', 'hooks.TaskCompleted', 'hooks.ConfigChange', 'hooks.CwdChanged', 'hooks.FileChanged', 'hooks.WorktreeCreate', 'hooks.WorktreeRemove', 'hooks.PreCompact', 'hooks.PostCompact', 'skill_activated', 'hook_execution_start', 'hook_execution_complete', 'internal_error', 'mcp_server_connection', 'compaction', 'plugin_installed', 'permission_mode_changed', 'hook_registered', 'plugin_loaded', 'managed_settings_resolved', 'retention_sweep'), 'system', 'other') AS actor, multiIf(LogAttributes['event.name'] = 'user_prompt' AND startsWith(LogAttributes['prompt'], '<agent-message'), 'agent hand-back', LogAttributes['event.name'] = 'user_prompt' AND startsWith(LogAttributes['prompt'], '<task-notification'), 'task notification', LogAttributes['event.name'] = 'user_prompt', if(LogAttributes['delivery.mode'] = 'mid_turn', 'prompt (mid-turn)', 'prompt'), LogAttributes['event.name'] = 'assistant_response', 'response', LogAttributes['event.name'] = 'api_refusal', 'api_refusal', LogAttributes['event.name'] = 'api_retries_exhausted', 'retries exhausted', LogAttributes['event.name'] = 'subagent_completed', concat(LogAttributes['agent_type'], ' done'), LogAttributes['event.name'] = 'hooks.UserPromptSubmit', 'prompt submit', LogAttributes['event.name'] = 'api_request', 'api_call', LogAttributes['event.name'] = 'api_error', 'api_error', LogAttributes['event.name'] = 'tool_result', concat(if(LogAttributes['agent_id'] != '', '↳ ', ''), LogAttributes['tool_name'], ' result'), LogAttributes['event.name'] = 'tool_decision', concat(if(LogAttributes['agent_id'] != '', '↳ ', ''), LogAttributes['tool_name'], ' decision'), LogAttributes['event.name'] = 'feedback_survey', 'feedback', LogAttributes['event.name'] = 'skill_activated', 'skill', LogAttributes['event.name'] = 'hooks.PreToolUse' AND (LogAttributes['agent_id'] != '' OR LogAttributes['agent.id'] != ''), concat('↳ ', LogAttributes['tool_name'], ' pre'), LogAttributes['event.name'] = 'hooks.PreToolUse', concat(LogAttributes['tool_name'], ' pre'), LogAttributes['event.name'] = 'hooks.PostToolUse' AND LogAttributes['tool_name'] = 'WebSearch', 'WebSearch results', LogAttributes['event.name'] = 'hooks.PostToolUse' AND (LogAttributes['agent_id'] != '' OR LogAttributes['agent.id'] != ''), concat('↳ ', LogAttributes['tool_name']), LogAttributes['event.name'] = 'hooks.PostToolUse', LogAttributes['tool_name'], LogAttributes['event.name'] = 'hooks.PostToolUseFailure' AND (LogAttributes['agent_id'] != '' OR LogAttributes['agent.id'] != ''), concat('↳ ', LogAttributes['tool_name'], ' FAIL'), LogAttributes['event.name'] = 'hooks.PostToolUseFailure', concat(LogAttributes['tool_name'], ' FAIL'), LogAttributes['event.name'] = 'hooks.SubagentStart', concat(LogAttributes['agent.type'], ' start'), LogAttributes['event.name'] = 'hooks.SubagentStop', concat(LogAttributes['agent.type'], ' stop'), LogAttributes['event.name'] = 'hooks.TeammateIdle', 'teammate idle', LogAttributes['event.name'] = 'hooks.TaskCreated', 'task created', LogAttributes['event.name'] = 'hooks.TaskCompleted', 'task done', LogAttributes['event.name'] = 'hooks.InstructionsLoaded', 'instructions', LogAttributes['event.name'] = 'hooks.PermissionRequest', 'permission', LogAttributes['event.name'] = 'hooks.PermissionDenied', 'permission denied', LogAttributes['event.name'] = 'hooks.Notification', 'notification', LogAttributes['event.name'] = 'hooks.SessionStart', 'session start', LogAttributes['event.name'] = 'hooks.SessionEnd', 'session end', LogAttributes['event.name'] = 'hooks.Stop', 'stop', LogAttributes['event.name'] = 'hooks.StopFailure', 'stop fail', LogAttributes['event.name'] = 'hooks.ConfigChange', 'config', LogAttributes['event.name'] = 'hooks.CwdChanged', 'cwd changed', LogAttributes['event.name'] = 'hooks.FileChanged', 'file changed', LogAttributes['event.name'] = 'hooks.WorktreeCreate', 'worktree create', LogAttributes['event.name'] = 'hooks.WorktreeRemove', 'worktree remove', LogAttributes['event.name'] = 'hooks.PreCompact', 'pre compact', LogAttributes['event.name'] = 'hooks.PostCompact', 'post compact', LogAttributes['event.name'] = 'hooks.Elicitation', 'elicitation', LogAttributes['event.name'] = 'hooks.ElicitationResult', 'elicitation result', LogAttributes['event.name'] = 'hook_execution_start', concat('⚙ ', LogAttributes['hook_event'], ' start'), LogAttributes['event.name'] = 'hook_execution_complete', concat('⚙ ', LogAttributes['hook_event'], ' done'), LogAttributes['event.name'] = 'internal_error', 'internal error', LogAttributes['event.name'] = 'mcp_server_connection', 'mcp connect', LogAttributes['event.name'] = 'compaction', 'compaction', LogAttributes['event.name'] = 'plugin_installed', 'plugin install', LogAttributes['event.name'] = 'permission_mode_changed', 'perm mode', LogAttributes['event.name'] = 'hook_registered', 'hook registered', LogAttributes['event.name'] = 'plugin_loaded', 'plugin loaded', LogAttributes['event.name'] = 'managed_settings_resolved', 'managed settings', LogAttributes['event.name'] = 'retention_sweep', 'retention sweep', LogAttributes['event.name'] = 'at_mention', '@ mention', LogAttributes['event.name'] = 'auth', 'auth', LogAttributes['event.name'] = 'api_request_body', 'request body', LogAttributes['event.name'] = 'api_response_body', 'response body', LogAttributes['event.name']) AS kind, multiIf(LogAttributes['event.name'] = 'user_prompt', LogAttributes['prompt'], LogAttributes['event.name'] = 'hooks.UserPromptSubmit', LogAttributes['prompt'], LogAttributes['event.name'] = 'api_request', concat(LogAttributes['model'], ' · ', LogAttributes['duration_ms'], 'ms · ', LogAttributes['input_tokens'], '+', LogAttributes['output_tokens'], 'tok · $', substring(LogAttributes['cost_usd'], 1, 7)), LogAttributes['event.name'] = 'api_error', LogAttributes['error'], LogAttributes['event.name'] = 'tool_result', concat(LogAttributes['duration_ms'], 'ms · success=', LogAttributes['success'], ' · ', LogAttributes['tool_result_size_bytes'], 'B', if(LogAttributes['tool_name'] IN ('Write', 'Edit', 'Read'), concat(' · ', JSONExtractString(LogAttributes['tool_input'], 'file_path')), '')), LogAttributes['event.name'] = 'tool_decision', concat(LogAttributes['decision'], ' (', LogAttributes['source'], ') ', coalesce(nullif(JSONExtractString(LogAttributes['tool_parameters'], 'full_command'), ''), nullif(JSONExtractString(LogAttributes['tool_parameters'], 'mcp_tool_name'), ''), nullif(JSONExtractString(LogAttributes['tool_parameters'], 'skill_name'), ''), nullif(JSONExtractString(LogAttributes['tool_parameters'], 'subagent_type'), ''), '')), LogAttributes['event.name'] = 'skill_activated', LogAttributes['skill.name'], LogAttributes['event.name'] = 'feedback_survey', LogAttributes['response'], LogAttributes['event.name'] = 'assistant_response', LogAttributes['response'], LogAttributes['event.name'] = 'api_refusal', concat(LogAttributes['model'], ' · ', LogAttributes['category']), LogAttributes['event.name'] = 'api_retries_exhausted', concat(LogAttributes['model'], ' · ', LogAttributes['total_attempts'], ' attempts · ', LogAttributes['error']), LogAttributes['event.name'] = 'subagent_completed', concat(LogAttributes['model'], ' · ', LogAttributes['total_tool_uses'], ' tools · ', LogAttributes['duration_ms'], 'ms · ', LogAttributes['total_tokens'], 'tok in the last request'), LogAttributes['event.name'] = 'hooks.PostToolUse' AND LogAttributes['tool_name'] = 'WebSearch', LogAttributes['search_urls'], LogAttributes['event.name'] = 'hooks.PreToolUse', LogAttributes['tool_input'], LogAttributes['event.name'] = 'hooks.PostToolUse', LogAttributes['tool_input'], LogAttributes['event.name'] = 'hooks.PostToolUseFailure', LogAttributes['error'], LogAttributes['event.name'] = 'hooks.SubagentStart', if(LogAttributes['agent_id'] != '', LogAttributes['agent_id'], LogAttributes['agent.id']), LogAttributes['event.name'] = 'hooks.SubagentStop', LogAttributes['agent.last_message'], LogAttributes['event.name'] = 'hooks.TeammateIdle', LogAttributes['teammate.name'], LogAttributes['event.name'] = 'hooks.TaskCreated', LogAttributes['task.subject'], LogAttributes['event.name'] = 'hooks.TaskCompleted', LogAttributes['task.subject'], LogAttributes['event.name'] = 'hooks.InstructionsLoaded', concat(LogAttributes['memory_type'], ': ', LogAttributes['file_path']), LogAttributes['event.name'] = 'hooks.PermissionRequest', concat(LogAttributes['tool_name'], ' — ', LogAttributes['tool_input']), LogAttributes['event.name'] = 'hooks.PermissionDenied', concat(LogAttributes['tool_name'], ' — ', LogAttributes['reason']), LogAttributes['event.name'] = 'hooks.Notification', concat(LogAttributes['notification_type'], ': ', LogAttributes['message']), LogAttributes['event.name'] = 'hooks.SessionStart', concat(LogAttributes['source'], ' · ', LogAttributes['model']), LogAttributes['event.name'] = 'hooks.SessionEnd', LogAttributes['reason'], LogAttributes['event.name'] = 'hooks.Stop', LogAttributes['last_assistant_message'], LogAttributes['event.name'] = 'hooks.StopFailure', LogAttributes['error'], LogAttributes['event.name'] = 'hooks.ConfigChange', concat(LogAttributes['source'], ': ', LogAttributes['file_path']), LogAttributes['event.name'] = 'hooks.CwdChanged', concat(LogAttributes['old_cwd'], ' → ', LogAttributes['new_cwd']), LogAttributes['event.name'] = 'hooks.FileChanged', concat(LogAttributes['event'], ': ', LogAttributes['file_path']), LogAttributes['event.name'] IN ('hooks.WorktreeCreate', 'hooks.WorktreeRemove'), LogAttributes['worktree.path'], LogAttributes['event.name'] = 'hooks.PreCompact', concat(LogAttributes['trigger'], ' · ', LogAttributes['custom_instructions']), LogAttributes['event.name'] = 'hooks.PostCompact', concat(LogAttributes['trigger'], ' · ', LogAttributes['compact_summary']), LogAttributes['event.name'] = 'hooks.Elicitation', concat(LogAttributes['mcp_server_name'], ': ', LogAttributes['message']), LogAttributes['event.name'] = 'hooks.ElicitationResult', concat(LogAttributes['mcp_server_name'], ': ', LogAttributes['action']), LogAttributes['event.name'] = 'hook_execution_start', concat(LogAttributes['hook_event'], ' (', LogAttributes['num_hooks'], ' hooks)'), LogAttributes['event.name'] = 'hook_execution_complete', concat(LogAttributes['hook_event'], ' · ', LogAttributes['total_duration_ms'], 'ms · ', LogAttributes['num_success'], ' ok'), LogAttributes['event.name'] = 'internal_error', concat(LogAttributes['error_name'], ': ', LogAttributes['error_code']), LogAttributes['event.name'] = 'mcp_server_connection', concat(LogAttributes['server_name'], ' ', LogAttributes['status'], ' · ', LogAttributes['transport_type']), LogAttributes['event.name'] = 'compaction', concat(LogAttributes['trigger'], ' · ', LogAttributes['pre_tokens'], ' → ', LogAttributes['post_tokens'], 'tok'), LogAttributes['event.name'] = 'plugin_installed', concat(LogAttributes['plugin.name'], if(LogAttributes['plugin.version'] != '', concat('@', LogAttributes['plugin.version']), '')), LogAttributes['event.name'] = 'permission_mode_changed', concat(LogAttributes['from_mode'], ' → ', LogAttributes['to_mode']), LogAttributes['event.name'] = 'hook_registered', concat(LogAttributes['hook_event'], if(LogAttributes['hook_matcher'] != '', concat(' [', LogAttributes['hook_matcher'], ']'), ''), ' · ', LogAttributes['hook_type'], ' · ', if(LogAttributes['plugin.name'] != '', LogAttributes['plugin.name'], LogAttributes['hook_source'])), LogAttributes['event.name'] = 'plugin_loaded', concat(LogAttributes['plugin.name'], if(LogAttributes['plugin.version'] != '', concat('@', LogAttributes['plugin.version']), ''), ' · ', LogAttributes['plugin.scope'], if(LogAttributes['has_hooks'] = 'true', ' · has hooks', '')), LogAttributes['event.name'] = 'managed_settings_resolved', concat(LogAttributes['managed_settings.trigger'], ' · sources ', LogAttributes['managed_settings.sources']), LogAttributes['event.name'] = 'retention_sweep', concat(LogAttributes['result'], ' · ', LogAttributes['period_days'], ' days · deleted ', LogAttributes['transcripts_deleted'], ' transcripts, ', LogAttributes['session_files_deleted'], ' session files, ', LogAttributes['artifacts_deleted'], ' artifacts'), LogAttributes['event.name'] = 'at_mention', concat(LogAttributes['mention_type'], ' · success=', LogAttributes['success']), LogAttributes['event.name'] = 'auth', concat(LogAttributes['action'], ' · ', LogAttributes['auth_method'], ' · success=', LogAttributes['success']), LogAttributes['event.name'] IN ('api_request_body', 'api_response_body'), concat(LogAttributes['model'], ' · ', LogAttributes['body_length'], ' chars'), '') AS detail FROM claudalytics.otel_logs WHERE $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND ($__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session)) AND LogAttributes['event.name'] NOT IN ('hook_execution_start', 'hook_execution_complete') AND (${show_startup} = 1 OR LogAttributes['event.name'] NOT IN ('plugin_loaded', 'hook_registered', 'mcp_server_connection', 'managed_settings_resolved')) AND (NOT startsWith(LogAttributes['event.name'], 'hooks.') OR LogAttributes['event.name'] IN ('hooks.SessionStart', 'hooks.SessionEnd', 'hooks.ConfigChange', 'hooks.CwdChanged', 'hooks.InstructionsLoaded', 'hooks.Notification', 'hooks.SubagentStart', 'hooks.Elicitation', 'hooks.ElicitationResult', 'hooks.TeammateIdle') OR (LogAttributes['event.name'] = 'hooks.PostToolUse' AND LogAttributes['tool_name'] = 'WebSearch') OR LogAttributes['session.id'] NOT IN (SELECT LogAttributes['session.id'] FROM claudalytics.otel_logs WHERE LogAttributes['event.name'] IN ('user_prompt', 'tool_result') AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session))) ORDER BY time LIMIT 2000",
           "format": 1,
           "queryType": "sql"
         }
@@ -1550,6 +1655,30 @@
                 "value": 130
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "event"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 170
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "source"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
           }
         ]
       }
@@ -1572,7 +1701,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "WITH api AS (SELECT LogAttributes['user.email'] AS user, uniqExact(LogAttributes['session.id']) AS sessions, uniqExactIf(LogAttributes['prompt.id'], LogAttributes['event.name']='user_prompt') AS prompts, countIf(LogAttributes['event.name']='api_request') AS api_calls, sumIf(toFloat64OrZero(LogAttributes['cost_usd']), LogAttributes['event.name']='api_request') AS cost_usd, sumIf(toUInt64OrZero(LogAttributes['input_tokens'])+toUInt64OrZero(LogAttributes['output_tokens']), LogAttributes['event.name']='api_request') AS tokens FROM claudalytics.otel_logs WHERE LogAttributes['user.email']!='' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) GROUP BY user), commits AS (SELECT Attributes['user.email'] AS user, sum(Value) AS commits FROM claudalytics.otel_metrics_sum WHERE MetricName='claude_code.commit.count' AND $__timeFilter(TimeUnix) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) GROUP BY user), loc AS (SELECT Attributes['user.email'] AS user, sumIf(Value, Attributes['type']='added') AS lines_added FROM claudalytics.otel_metrics_sum WHERE MetricName='claude_code.lines_of_code.count' AND $__timeFilter(TimeUnix) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) GROUP BY user) SELECT a.user AS user, a.sessions AS sessions, a.prompts AS prompts, a.api_calls AS api_calls, round(a.cost_usd, 4) AS cost_usd, a.tokens AS tokens, c.commits AS commits, l.lines_added AS lines_added FROM api a LEFT JOIN commits c ON a.user = c.user LEFT JOIN loc l ON a.user = l.user ORDER BY cost_usd DESC",
+          "rawSql": "WITH api AS (SELECT LogAttributes['user.email'] AS user, uniqExactIf(LogAttributes['session.id'], LogAttributes['event.name'] IN ('user_prompt', 'api_request')) AS sessions, uniqExactIf(LogAttributes['prompt.id'], LogAttributes['event.name']='user_prompt' AND NOT startsWith(LogAttributes['prompt'], '<agent-message') AND NOT startsWith(LogAttributes['prompt'], '<task-notification')) AS prompts, countIf(LogAttributes['event.name']='api_request') AS api_calls, sumIf(toFloat64OrZero(LogAttributes['cost_usd']), LogAttributes['event.name']='api_request') AS cost_usd, sumIf(toUInt64OrZero(LogAttributes['input_tokens'])+toUInt64OrZero(LogAttributes['output_tokens']), LogAttributes['event.name']='api_request') AS tokens FROM claudalytics.otel_logs WHERE LogAttributes['user.email']!='' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) GROUP BY user), commits AS (SELECT Attributes['user.email'] AS user, sum(Value) AS commits FROM claudalytics.otel_metrics_sum WHERE MetricName='claude_code.commit.count' AND $__timeFilter(TimeUnix) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) GROUP BY user), loc AS (SELECT Attributes['user.email'] AS user, sumIf(Value, Attributes['type']='added') AS lines_added FROM claudalytics.otel_metrics_sum WHERE MetricName='claude_code.lines_of_code.count' AND $__timeFilter(TimeUnix) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) GROUP BY user) SELECT a.user AS user, a.sessions AS sessions, a.prompts AS prompts, a.api_calls AS api_calls, round(a.cost_usd, 4) AS cost_usd, a.tokens AS tokens, c.commits AS commits, l.lines_added AS lines_added FROM api a LEFT JOIN commits c ON a.user = c.user LEFT JOIN loc l ON a.user = l.user ORDER BY cost_usd DESC",
           "format": 1,
           "queryType": "sql"
         }
@@ -1634,7 +1763,7 @@
       }
     },
     {
-      "id": 29,
+      "id": 43,
       "title": "Recent Errors (cross-session) [KAN-37]",
       "description": "Failed tool calls across all sessions, newest first. Filter by tool/user/session to diagnose cross-session incidents. Cross-session by design — ignores the ${session} template variable.",
       "type": "table",
@@ -1651,7 +1780,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT Timestamp AS time, substring(LogAttributes['session.id'], 1, 8) AS session, LogAttributes['user.email'] AS user, LogAttributes['tool_name'] AS tool, substring(LogAttributes['tool_input'], 1, 180) AS detail, toUInt32OrZero(LogAttributes['duration_ms']) AS duration_ms FROM claudalytics.otel_logs WHERE LogAttributes['event.name']='tool_result' AND LogAttributes['success']='false' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) ORDER BY Timestamp DESC LIMIT 100",
+          "rawSql": "SELECT Timestamp AS time, substring(LogAttributes['session.id'], 1, 8) AS session, LogAttributes['user.email'] AS user, LogAttributes['tool_name'] AS tool, concat(LogAttributes['error'], ' · ', LogAttributes['tool_input']) AS detail, toUInt32OrZero(LogAttributes['duration_ms']) AS duration_ms FROM claudalytics.otel_logs WHERE LogAttributes['event.name']='tool_result' AND LogAttributes['success']='false' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) ORDER BY Timestamp DESC LIMIT 100",
           "format": 1,
           "queryType": "sql"
         }
@@ -1729,6 +1858,18 @@
                 "value": 100
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "detail"
+            },
+            "properties": [
+              {
+                "id": "custom.minWidth",
+                "value": 400
+              }
+            ]
           }
         ]
       }
@@ -1780,7 +1921,7 @@
     {
       "id": 30,
       "title": "Subagent Usage [KAN-45]",
-      "description": "Subagent (Agent tool) dispatch overview. Only the dispatch side is observable — internal tool calls and skill invocations inside the subagent are NOT captured (see KAN-41). 'model' shows 'inherit' when the dispatcher did not pass an explicit model (subagent inherits from parent). 'subagent_type' may be plugin-namespaced (e.g. superpowers:code-reviewer) or bare (e.g. general-purpose, Explore).",
+      "description": "Subagent (Agent tool) overview. 'calls', 'successes' and 'failures' count the Agent tool calls that start a subagent. 'completed_runs', 'total_run_ms' and 'avg_run_ms' come from the subagent_completed events of the same session and subagent type: a run is one finished turn of a subagent, so a subagent that is continued later counts as more than one run, and a subagent that is still running is not counted yet. The run time is the real work time, also for background subagents (the Agent tool call of a background subagent returns after a few milliseconds). 'model' shows 'inherit' when no subagent_completed event and no explicit model exist. 'subagent_type' may be plugin-namespaced (e.g. superpowers:code-reviewer) or bare (e.g. general-purpose, Explore).",
       "type": "table",
       "gridPos": {
         "x": 0,
@@ -1795,7 +1936,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT JSONExtractString(LogAttributes['tool_input'], 'subagent_type') AS subagent_type, coalesce(nullIf(JSONExtractString(LogAttributes['tool_input'], 'model'), ''), 'inherit') AS model, count() AS calls, countIf(LogAttributes['success'] = 'true') AS successes, countIf(LogAttributes['success'] != 'true') AS failures, round(countIf(LogAttributes['success'] = 'true') / count() * 100, 1) AS success_rate, sum(toUInt64OrZero(LogAttributes['duration_ms'])) AS total_duration_ms, round(avg(toUInt64OrZero(LogAttributes['duration_ms'])), 0) AS avg_duration_ms, max(Timestamp) AS last_used, any(JSONExtractString(LogAttributes['tool_input'], 'description')) AS sample_description FROM claudalytics.otel_logs WHERE $__timeFilter(Timestamp) AND LogAttributes['tool_name'] = 'Agent' AND LogAttributes['event.name'] = 'tool_result' AND ($__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project)) AND ($__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session)) GROUP BY subagent_type, model ORDER BY calls DESC",
+          "rawSql": "WITH completed AS (SELECT LogAttributes['session.id'] AS session_id, LogAttributes['agent_type'] AS agent_type, any(LogAttributes['model']) AS model, count() AS runs, sum(toUInt64OrZero(LogAttributes['duration_ms'])) AS run_ms FROM claudalytics.otel_logs WHERE $__timeFilter(Timestamp) AND LogAttributes['event.name'] = 'subagent_completed' GROUP BY session_id, agent_type) SELECT JSONExtractString(LogAttributes['tool_input'], 'subagent_type') AS subagent_type, coalesce(nullIf(completed.model, ''), nullIf(JSONExtractString(LogAttributes['tool_input'], 'model'), ''), 'inherit') AS model, count() AS calls, countIf(LogAttributes['success'] = 'true') AS successes, countIf(LogAttributes['success'] != 'true') AS failures, round(countIf(LogAttributes['success'] = 'true') / count() * 100, 1) AS success_rate, arraySum(arrayMap(run -> run.2, groupUniqArray((completed.session_id, completed.runs, completed.run_ms)))) AS completed_runs, arraySum(arrayMap(run -> run.3, groupUniqArray((completed.session_id, completed.runs, completed.run_ms)))) AS total_run_ms, if(completed_runs = 0, 0, round(total_run_ms / completed_runs, 0)) AS avg_run_ms, max(Timestamp) AS last_used, any(JSONExtractString(LogAttributes['tool_input'], 'description')) AS sample_description FROM claudalytics.otel_logs AS dispatch LEFT JOIN completed ON completed.session_id = dispatch.LogAttributes['session.id'] AND completed.agent_type = JSONExtractString(dispatch.LogAttributes['tool_input'], 'subagent_type') WHERE $__timeFilter(Timestamp) AND LogAttributes['tool_name'] = 'Agent' AND LogAttributes['event.name'] = 'tool_result' AND ($__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project)) AND ($__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session)) GROUP BY subagent_type, model ORDER BY calls DESC",
           "format": 1,
           "queryType": "sql"
         }
@@ -1861,7 +2002,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "total_duration_ms"
+              "options": "total_run_ms"
             },
             "properties": [
               {
@@ -1873,7 +2014,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "avg_duration_ms"
+              "options": "avg_run_ms"
             },
             "properties": [
               {
@@ -1912,7 +2053,7 @@
     {
       "id": 33,
       "title": "Blocked Actions by Tool [KAN-58]",
-      "description": "Tool calls where PreToolUse fired but no PostToolUse/PostToolUseFailure arrived. Powered by blocked_tools ReplacingMergeTree — no anti-join needed.",
+      "description": "Rejected tool calls from OTel tool_decision, split by reason: user_reject, user_abort (the permission ask was interrupted), config or hook. Rows marked 'legacy: no PostToolUse' come from hook data written before the upgrade: a PreToolUse with no PostToolUse, which also counted interrupted calls.",
       "type": "table",
       "gridPos": {
         "x": 0,
@@ -1927,7 +2068,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT tool_name AS tool, count() AS blocked, substring(any(tool_input), 1, 160) AS sample_input FROM claudalytics.blocked_tools FINAL WHERE completed = 0 AND $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) GROUP BY tool ORDER BY blocked DESC LIMIT 50",
+          "rawSql": "SELECT tool_name AS tool, if(decision_source = '', 'legacy: no PostToolUse', decision_source) AS reason, count() AS blocked, any(tool_input) AS sample_input FROM claudalytics.blocked_tools FINAL WHERE completed = 0 AND $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) GROUP BY tool, reason ORDER BY blocked DESC LIMIT 50",
           "format": 1,
           "queryType": "sql"
         }
@@ -1942,7 +2083,8 @@
         "defaults": {
           "custom": {
             "align": "auto",
-            "displayMode": "auto"
+            "displayMode": "auto",
+            "inspect": true
           }
         },
         "overrides": []
@@ -1951,7 +2093,7 @@
     {
       "id": 34,
       "title": "Blocked Rate Over Time [KAN-58]",
-      "description": "Blocked-tool count per interval. Powered by blocked_tools MV — no anti-join needed.",
+      "description": "Rejected tool calls per interval, one series per reason (user_reject, user_abort, config, hook). 'legacy: no PostToolUse' is hook data from before the upgrade.",
       "type": "timeseries",
       "gridPos": {
         "x": 12,
@@ -1966,7 +2108,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT $__timeInterval(toDateTime(timestamp)) AS time, count() AS blocked FROM claudalytics.blocked_tools FINAL WHERE completed = 0 AND $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) GROUP BY time ORDER BY time",
+          "rawSql": "SELECT $__timeInterval(toDateTime(timestamp)) AS time, if(decision_source = '', 'legacy: no PostToolUse', decision_source) AS reason, count() AS blocked FROM claudalytics.blocked_tools FINAL WHERE completed = 0 AND $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) GROUP BY time, reason ORDER BY time",
           "format": 0,
           "queryType": "timeseries"
         }
@@ -1991,7 +2133,7 @@
     {
       "id": 35,
       "title": "Compaction Events [KAN-59]",
-      "description": "Compaction pre/post pairs with computed duration. Queries compaction_events table (tiny) instead of otel_logs (huge).",
+      "description": "One row per compaction. OTel compaction rows carry their own duration and tokens. Rows written by hooks before the upgrade are pre/post pairs: their duration is computed and they have no token counts.",
       "type": "table",
       "gridPos": {
         "x": 0,
@@ -2006,7 +2148,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "WITH pre AS (SELECT session_id AS sid, timestamp AS t_pre, trigger AS trig, custom_instructions AS ci FROM claudalytics.compaction_events WHERE event_phase = 'pre' AND $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session)), post AS (SELECT session_id AS sid, timestamp AS t_post FROM claudalytics.compaction_events WHERE event_phase = 'post' AND $__timeFilter(toDateTime(timestamp))) SELECT substring(pre.sid, 1, 8) AS session, t_pre AS time, trig AS trigger, ci AS custom_instructions, dateDiff('millisecond', t_pre, t_post) AS duration_ms FROM pre ASOF LEFT JOIN post ON pre.sid = post.sid AND pre.t_pre <= post.t_post ORDER BY time DESC LIMIT 200",
+          "rawSql": "WITH pre AS (SELECT session_id AS sid, timestamp AS t_pre, trigger AS trig, custom_instructions AS ci FROM claudalytics.compaction_events WHERE event_phase = 'pre' AND $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session)), post AS (SELECT session_id AS sid, timestamp AS t_post FROM claudalytics.compaction_events WHERE event_phase = 'post' AND $__timeFilter(toDateTime(timestamp))) SELECT * FROM (SELECT substring(pre.sid, 1, 8) AS session, t_pre AS time, trig AS trigger, ci AS custom_instructions, dateDiff('millisecond', t_pre, t_post) AS duration_ms, toUInt64(0) AS pre_tokens, toUInt64(0) AS post_tokens FROM pre ASOF LEFT JOIN post ON pre.sid = post.sid AND pre.t_pre <= post.t_post UNION ALL SELECT substring(session_id, 1, 8) AS session, timestamp AS time, trigger, custom_instructions, toInt64(duration_ms) AS duration_ms, pre_tokens, post_tokens FROM claudalytics.compaction_events WHERE event_phase = 'compaction' AND $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session)) ORDER BY time DESC LIMIT 200",
           "format": 1,
           "queryType": "sql"
         }
@@ -2021,7 +2163,8 @@
         "defaults": {
           "custom": {
             "align": "auto",
-            "displayMode": "auto"
+            "displayMode": "auto",
+            "inspect": true
           }
         },
         "overrides": []
@@ -2030,7 +2173,7 @@
     {
       "id": 36,
       "title": "Compaction Frequency [KAN-59]",
-      "description": "Compaction count per interval. Queries compaction_events table instead of otel_logs.",
+      "description": "Compactions per interval: OTel compaction rows plus the pre rows of the older hook pairs.",
       "type": "timeseries",
       "gridPos": {
         "x": 16,
@@ -2045,7 +2188,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT $__timeInterval(toDateTime(timestamp)) AS time, count() AS compactions FROM claudalytics.compaction_events WHERE event_phase = 'pre' AND $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) GROUP BY time ORDER BY time",
+          "rawSql": "SELECT $__timeInterval(toDateTime(timestamp)) AS time, count() AS compactions FROM claudalytics.compaction_events WHERE event_phase IN ('pre', 'compaction') AND $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) GROUP BY time ORDER BY time",
           "format": 0,
           "queryType": "timeseries"
         }
@@ -2070,7 +2213,7 @@
     {
       "id": 37,
       "title": "Sessions With Config Changes [KAN-60]",
-      "description": "Distinct sessions where CLAUDE.md or .claude/rules/*.md was mutated during the selected time range.",
+      "description": "Distinct sessions with a settings change (ConfigChange hook). Needs OTel + hooks mode: OTel has no config-change event, so this stays at 0 in OTel-only mode.",
       "type": "stat",
       "gridPos": {
         "x": 0,
@@ -2095,9 +2238,7 @@
         "graphMode": "none",
         "textMode": "auto",
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
+          "calcs": ["lastNotNull"],
           "fields": "",
           "values": false
         }
@@ -2110,7 +2251,7 @@
     {
       "id": 38,
       "title": "Config Changes — Audit Log [KAN-60]",
-      "description": "Runtime policy mutations. OTel cannot see these. In team contexts, correlate with subsequent block-rate drop to flag weakened guardrails.",
+      "description": "Settings changes during a session (ConfigChange hook): which settings file and source. Needs OTel + hooks mode: OTel has no config-change event, so this stays empty in OTel-only mode.",
       "type": "table",
       "gridPos": {
         "x": 4,
@@ -2140,8 +2281,10 @@
         "defaults": {
           "custom": {
             "align": "auto",
-            "displayMode": "auto"
-          }
+            "displayMode": "auto",
+            "inspect": true
+          },
+          "noValue": "No config changes. This panel needs OTel + hooks mode."
         },
         "overrides": []
       }
@@ -2149,7 +2292,7 @@
     {
       "id": 39,
       "title": "Credential Exposures by Category [KAN-63]",
-      "description": "Sensitive files accessed by the Read tool, auto-detected via materialized view pattern matching against 38 credential/secret file patterns.",
+      "description": "Sensitive files read with the Read tool, with Grep on the file itself, or with a shell read command (cat, type, head, tail, less, more, Get-Content, gc). A materialized view finds them by matching the path against 38 credential/secret file patterns.",
       "type": "barchart",
       "gridPos": {
         "x": 0,
@@ -2207,7 +2350,7 @@
     {
       "id": 40,
       "title": "Credential Exposure Detail [KAN-63]",
-      "description": "Each sensitive file detected by the Read tool. Metadata only — file contents are never stored.",
+      "description": "Each read of a sensitive file: the Read tool, Grep on the file itself, or a shell read command. This table holds the path, not the file text. In traces the collector puts a marker in place of the text of such a file, but not in every case: see Known limits in the README. source says what wrote the rows: otel (Claude Code's own telemetry). It is empty on rows from before schema v7, so a file read before and after the upgrade has two lines.",
       "type": "table",
       "gridPos": {
         "x": 10,
@@ -2222,7 +2365,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT file_name, matched_label, pattern_category, count() AS times_accessed, uniqExact(session_id) AS sessions, max(timestamp) AS last_seen FROM claudalytics.credential_exposures WHERE $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) GROUP BY file_name, matched_label, pattern_category ORDER BY times_accessed DESC LIMIT 100",
+          "rawSql": "SELECT file_name, matched_label, pattern_category, source, count() AS times_accessed, uniqExact(session_id) AS sessions, max(timestamp) AS last_seen FROM claudalytics.credential_exposures WHERE $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) GROUP BY file_name, matched_label, pattern_category, source ORDER BY times_accessed DESC LIMIT 100",
           "format": 1,
           "queryType": "sql"
         }
@@ -2317,7 +2460,7 @@
     {
       "id": 41,
       "title": "Most Modified Files [KAN-69]",
-      "description": "Every file Claude mutated (Edit=update, Write=write, Bash rm=delete). No row limit — shows all touched files. Powered by file_mutations_mv materialized views.",
+      "description": "Every file Claude mutated (Edit=update, Write=write, a delete command in Bash or PowerShell=delete; changed = older FileChanged hook rows). No row limit — shows all touched files. In OTel-only mode, a delete after about character 128 of a long PowerShell command is not seen. source says what wrote the rows: otel (Claude Code's own telemetry). It is empty on rows from before schema v7, so a file changed before and after the upgrade has two lines.",
       "type": "table",
       "gridPos": {
         "x": 0,
@@ -2332,7 +2475,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT file_name, file_extension, directory, count() AS total_mutations, countIf(action = 'update') AS updates, countIf(action = 'write') AS writes, countIf(action = 'delete') AS deletes, countIf(action = 'changed') AS changed, uniqExact(session_id) AS sessions, max(timestamp) AS last_modified FROM claudalytics.file_mutations WHERE $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) GROUP BY file_name, file_extension, directory ORDER BY total_mutations DESC",
+          "rawSql": "SELECT file_name, file_extension, directory, source, count() AS total_mutations, countIf(action = 'update') AS updates, countIf(action = 'write') AS writes, countIf(action = 'delete') AS deletes, countIf(action = 'changed') AS changed, uniqExact(session_id) AS sessions, max(timestamp) AS last_modified FROM claudalytics.file_mutations WHERE $__timeFilter(toDateTime(timestamp)) AND $__conditionalAll(project_name IN (${project:singlequote}), $project) AND $__conditionalAll(session_id IN (${session:singlequote}), $session) GROUP BY file_name, file_extension, directory, source ORDER BY total_mutations DESC",
           "format": 1,
           "queryType": "sql"
         }
@@ -2442,16 +2585,14 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT sum(toUInt64OrZero(LogAttributes['input_tokens']) + toUInt64OrZero(LogAttributes['output_tokens']) + toUInt64OrZero(LogAttributes['cache_read_input_tokens']) + toUInt64OrZero(LogAttributes['cache_creation_input_tokens'])) AS total_tokens FROM claudalytics.otel_logs WHERE LogAttributes['event.name'] = 'api_request' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session)",
+          "rawSql": "SELECT sum(toUInt64OrZero(LogAttributes['input_tokens']) + toUInt64OrZero(LogAttributes['output_tokens']) + toUInt64OrZero(LogAttributes['cache_read_tokens']) + toUInt64OrZero(LogAttributes['cache_creation_tokens'])) AS total_tokens FROM claudalytics.otel_logs WHERE LogAttributes['event.name'] = 'api_request' AND $__timeFilter(Timestamp) AND $__conditionalAll(ResourceAttributes['project.name'] IN (${project:singlequote}), $project) AND $__conditionalAll(LogAttributes['session.id'] IN (${session:singlequote}), $session)",
           "format": 1,
           "queryType": "sql"
         }
       ],
       "options": {
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
+          "calcs": ["lastNotNull"]
         },
         "orientation": "auto",
         "textMode": "auto",

@@ -5,14 +5,14 @@
     "email": "jimkeecn@gmail.com"
   },
   "metadata": {
-    "description": "OTel + Hooks analytics for Claude Code. Local ClickHouse + Grafana stack with zero cloud dependencies."
+    "description": "OTel analytics for Claude Code, with optional hook capture. Local ClickHouse + Grafana stack with zero cloud dependencies."
   },
   "plugins": [
     {
       "name": "claudalytics",
       "source": "./plugin",
-      "description": "OTel + Hooks analytics for Claude Code. Captures telemetry and hook events into ClickHouse, visualises via Grafana dashboards.",
-      "version": "1.1.0",
+      "description": "OTel analytics for Claude Code. Captures Claude Code's own telemetry into ClickHouse, visualises via Grafana dashboards. Ships no hooks.",
+      "version": "2.0.0",
       "homepage": "https://github.com/jimkeecn/Claudalytics",
       "repository": "https://github.com/jimkeecn/Claudalytics",
       "license": "MIT",
@@ -24,6 +24,18 @@
         "clickhouse",
         "grafana"
       ],
+      "category": "analytics"
+    },
+    {
+      "name": "claudalytics-hook-capture",
+      "source": "./plugin-hook-capture",
+      "description": "Optional hook capture for Claudalytics (OTel + hooks mode): the events OTel cannot give, plus a Docker stack health check at session start. Off by default; /init-claudalytics turns it on per project.",
+      "version": "2.0.0",
+      "defaultEnabled": false,
+      "homepage": "https://github.com/jimkeecn/Claudalytics",
+      "repository": "https://github.com/jimkeecn/Claudalytics",
+      "license": "MIT",
+      "keywords": ["analytics", "hooks", "claudalytics"],
       "category": "analytics"
     }
   ]

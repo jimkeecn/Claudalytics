@@ -1,9 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
   EVENTS_TO_EMIT,
-  extractUrlsFromCommand,
+  HOOK_CAPTURE_MARKER,
+  HOOK_EVENT_SOURCE,
+  mapHookRequest,
   mapHookToAttributes,
-  safeBooleanString,
 } from "./field-mapping";
 import type { HookEvent } from "./hook-events";
 
@@ -22,33 +23,18 @@ describe("EVENTS_TO_EMIT", () => {
   const EXPECTED = [
     "SessionStart",
     "SessionEnd",
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PostToolUse",
-    "PostToolUseFailure",
-    "PermissionRequest",
-    "PermissionDenied",
-    "Notification",
-    "SubagentStart",
-    "SubagentStop",
-    "TaskCreated",
-    "TaskCompleted",
-    "Stop",
-    "StopFailure",
-    "TeammateIdle",
-    "InstructionsLoaded",
     "ConfigChange",
     "CwdChanged",
-    "FileChanged",
-    "WorktreeCreate",
-    "WorktreeRemove",
-    "PreCompact",
-    "PostCompact",
+    "InstructionsLoaded",
+    "Notification",
+    "SubagentStart",
     "Elicitation",
     "ElicitationResult",
+    "TeammateIdle",
+    "PostToolUse",
   ] as const;
 
-  it("has exactly the 26 expected hook event names", () => {
+  it("has exactly the events OTel cannot give", () => {
     expect([...EVENTS_TO_EMIT].sort()).toEqual([...EXPECTED].sort());
   });
 
@@ -58,79 +44,114 @@ describe("EVENTS_TO_EMIT", () => {
   });
 });
 
-describe("safeBooleanString", () => {
-  it.each([
-    [true, "true"],
-    [false, "false"],
-    ["true", "true"],
-    ["TRUE", "true"],
-    ["True", "true"],
-    ["false", "false"],
-    ["FALSE", "false"],
-    ["False", "false"],
-    [undefined, "false"],
-    [null, "false"],
-    [0, "false"],
-    [1, "false"],
-    ["", "false"],
-    ["random", "false"],
-    [{}, "false"],
-    [[], "false"],
-  ])("safeBooleanString(%p) → %s", (input, expected) => {
-    expect(safeBooleanString(input)).toBe(expected);
+describe("event.source", () => {
+  it("is hook on every event that is sent on", () => {
+    for (const eventName of EVENTS_TO_EMIT) {
+      const attrs = mapHookToAttributes(
+        event({ hook_event_name: eventName, tool_name: "WebSearch" }),
+      );
+      expect(attrs!["event.source"]).toBe("hook");
+    }
+    expect(HOOK_EVENT_SOURCE).toBe("hook");
+  });
+
+  it("is not taken from the payload: Claude Code's own source field stays apart", () => {
+    const attrs = mapHookToAttributes(
+      event({ hook_event_name: "SessionStart", source: "startup" }),
+    );
+    expect(attrs!["source"]).toBe("startup");
+    expect(attrs!["event.source"]).toBe("hook");
   });
 });
 
-describe("extractUrlsFromCommand", () => {
-  it("returns [] for non-string input", () => {
-    expect(extractUrlsFromCommand(undefined)).toEqual([]);
-    expect(extractUrlsFromCommand(null)).toEqual([]);
-    expect(extractUrlsFromCommand(42)).toEqual([]);
-    expect(extractUrlsFromCommand({})).toEqual([]);
+describe("ids from Claude Code", () => {
+  it("stores the tool call id and the subagent id under the names OTel rows use", () => {
+    const attrs = mapHookToAttributes(
+      event({
+        hook_event_name: "PostToolUse",
+        tool_name: "WebSearch",
+        tool_use_id: "toolu_01",
+        agent_id: "agent_01",
+        prompt_id: "prompt_01",
+      }),
+    )!;
+    expect(attrs["tool_use_id"]).toBe("toolu_01");
+    expect(attrs["agent_id"]).toBe("agent_01");
+    expect(attrs["session.id"]).toBe("s");
+    expect(attrs["prompt.id"]).toBe("prompt_01");
+    expect(attrs).not.toHaveProperty("use_id");
+    expect(attrs).not.toHaveProperty("agent.id");
   });
 
-  it("returns [] for empty string", () => {
-    expect(extractUrlsFromCommand("")).toEqual([]);
+  it("makes up no id: an event without one has an empty agent_id and no tool_use_id", () => {
+    for (const eventName of EVENTS_TO_EMIT) {
+      if (eventName === "PostToolUse") continue;
+      const attrs = mapHookToAttributes(event({ hook_event_name: eventName }))!;
+      expect(attrs["agent_id"]).toBe("");
+      expect(attrs["prompt.id"]).toBe("");
+      expect(attrs).not.toHaveProperty("tool_use_id");
+    }
+    const webSearchWithoutId = mapHookToAttributes(
+      event({ hook_event_name: "PostToolUse", tool_name: "WebSearch" }),
+    )!;
+    expect(webSearchWithoutId["tool_use_id"]).toBe("");
+  });
+});
+
+describe("mapHookRequest — hook-capture marker", () => {
+  it("re-emits a marked SessionEnd", () => {
+    const attrs = mapHookRequest(
+      event({ hook_event_name: "SessionEnd", reason: "logout" }),
+      HOOK_CAPTURE_MARKER,
+    );
+    expect(attrs!["event.name"]).toBe("hooks.SessionEnd");
   });
 
-  it("extracts a single https URL", () => {
-    expect(extractUrlsFromCommand("curl https://example.com/foo")).toEqual([
-      "https://example.com/foo",
-    ]);
+  it("produces no row for an unmarked SessionEnd (old plugin copy)", () => {
+    expect(
+      mapHookRequest(event({ hook_event_name: "SessionEnd" }), null),
+    ).toBeNull();
   });
 
-  it("extracts multiple URLs in command order", () => {
-    const cmd = "curl https://a.com && wget http://b.com/x";
-    expect(extractUrlsFromCommand(cmd)).toEqual([
-      "https://a.com",
-      "http://b.com/x",
-    ]);
+  it("produces no row for a wrong marker value", () => {
+    expect(
+      mapHookRequest(event({ hook_event_name: "SessionEnd" }), "other"),
+    ).toBeNull();
   });
 
-  it("trims trailing punctuation", () => {
-    expect(extractUrlsFromCommand("Visit https://example.com.")).toEqual([
-      "https://example.com",
-    ]);
-    expect(extractUrlsFromCommand("(see https://example.com/x),")).toEqual([
-      "https://example.com/x",
-    ]);
-    expect(extractUrlsFromCommand("[ref: https://example.com/y]")).toEqual([
-      "https://example.com/y",
-    ]);
+  it("produces no row for a marked WorktreeCreate", () => {
+    expect(
+      mapHookRequest(
+        event({ hook_event_name: "WorktreeCreate" }),
+        HOOK_CAPTURE_MARKER,
+      ),
+    ).toBeNull();
   });
 
-  it("deduplicates identical URLs", () => {
-    const cmd = "curl https://a.com; curl https://a.com";
-    expect(extractUrlsFromCommand(cmd)).toEqual(["https://a.com"]);
+  it("produces no row for a marked Bash PostToolUse", () => {
+    expect(
+      mapHookRequest(
+        event({
+          hook_event_name: "PostToolUse",
+          tool_name: "Bash",
+          tool_input: { command: "curl https://a.com" },
+        }),
+        HOOK_CAPTURE_MARKER,
+      ),
+    ).toBeNull();
   });
 
-  it("caps output at 10 URLs", () => {
-    const urls = Array.from({ length: 15 }, (_, i) => `https://a${i}.com`);
-    const cmd = urls.join(" && ");
-    const extracted = extractUrlsFromCommand(cmd);
-    expect(extracted).toHaveLength(10);
-    expect(extracted[0]).toBe("https://a0.com");
-    expect(extracted[9]).toBe("https://a9.com");
+  it("re-emits a marked WebSearch PostToolUse", () => {
+    const attrs = mapHookRequest(
+      event({
+        hook_event_name: "PostToolUse",
+        tool_name: "WebSearch",
+        tool_input: { query: "q" },
+        tool_response: { results: [{ content: [{ url: "https://r.com" }] }] },
+      }),
+      HOOK_CAPTURE_MARKER,
+    );
+    expect(attrs!["search_urls"]).toBe('["https://r.com"]');
   });
 });
 
@@ -142,14 +163,46 @@ describe("mapHookToAttributes — gate", () => {
   it("returns null for empty event name", () => {
     expect(mapHookToAttributes(event({ hook_event_name: "" }))).toBeNull();
   });
+
+  it.each([
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUseFailure",
+    "PermissionRequest",
+    "PermissionDenied",
+    "SubagentStop",
+    "TaskCreated",
+    "TaskCompleted",
+    "Stop",
+    "StopFailure",
+    "PreCompact",
+    "PostCompact",
+    "FileChanged",
+    "WorktreeCreate",
+    "WorktreeRemove",
+  ])("returns null for %s, which OTel covers or which was dropped", (name) => {
+    expect(mapHookToAttributes(event({ hook_event_name: name }))).toBeNull();
+  });
+
+  it.each(["Bash", "Read", "Edit", "Write", "WebFetch", "Agent"])(
+    "returns null for a %s PostToolUse",
+    (toolName) => {
+      expect(
+        mapHookToAttributes(
+          event({ hook_event_name: "PostToolUse", tool_name: toolName }),
+        ),
+      ).toBeNull();
+    },
+  );
 });
 
 describe("mapHookToAttributes — common attrs", () => {
-  it("populates all seven common fields when provided", () => {
+  it("populates all common fields when provided", () => {
     const attrs = mapHookToAttributes(
       event({
         hook_event_name: "SessionStart",
         session_id: "abc",
+        prompt_id: "p1",
         transcript_path: "/t.jsonl",
         cwd: "/repo",
         permission_mode: "default",
@@ -162,8 +215,9 @@ describe("mapHookToAttributes — common attrs", () => {
     expect(attrs).not.toBeNull();
     expect(attrs!["event.name"]).toBe("hooks.SessionStart");
     expect(attrs!["session.id"]).toBe("abc");
+    expect(attrs!["prompt.id"]).toBe("p1");
     expect(attrs!["permission_mode"]).toBe("default");
-    expect(attrs!["agent.id"]).toBe("a1");
+    expect(attrs!["agent_id"]).toBe("a1");
     expect(attrs!["agent.type"]).toBe("Explore");
     expect(attrs!["transcript_path"]).toBe("/t.jsonl");
     expect(attrs!["cwd"]).toBe("/repo");
@@ -174,8 +228,9 @@ describe("mapHookToAttributes — common attrs", () => {
       hook_event_name: "SessionStart",
     } as unknown as HookEvent);
     expect(attrs!["session.id"]).toBe("");
+    expect(attrs!["prompt.id"]).toBe("");
     expect(attrs!["permission_mode"]).toBe("");
-    expect(attrs!["agent.id"]).toBe("");
+    expect(attrs!["agent_id"]).toBe("");
     expect(attrs!["agent.type"]).toBe("");
     expect(attrs!["transcript_path"]).toBe("");
     expect(attrs!["cwd"]).toBe("");
@@ -202,82 +257,6 @@ describe("mapHookToAttributes — per-event cases", () => {
     expect(attrs!["reason"]).toBe("logout");
   });
 
-  it("UserPromptSubmit emits prompt", () => {
-    const attrs = mapHookToAttributes(
-      event({ hook_event_name: "UserPromptSubmit", prompt: "hi" }),
-    );
-    expect(attrs!["prompt"]).toBe("hi");
-  });
-
-  it("PostToolUseFailure emits tool_name, use_id, error, is_interrupt", () => {
-    const attrs = mapHookToAttributes(
-      event({
-        hook_event_name: "PostToolUseFailure",
-        tool_name: "Bash",
-        tool_use_id: "tu_1",
-        tool_input: { command: "ls" },
-        error: "boom",
-        is_interrupt: true,
-      }),
-    );
-    expect(attrs!["tool_name"]).toBe("Bash");
-    expect(attrs!["use_id"]).toBe("tu_1");
-    expect(attrs!["error"]).toBe("boom");
-    expect(attrs!["is_interrupt"]).toBe("true");
-  });
-
-  it("PostToolUseFailure extracts bash_urls when Bash command contains URLs", () => {
-    const attrs = mapHookToAttributes(
-      event({
-        hook_event_name: "PostToolUseFailure",
-        tool_name: "Bash",
-        tool_use_id: "tu_x",
-        tool_input: { command: "curl https://failed.example.com/x" },
-        error: "timeout",
-      }),
-    );
-    expect(attrs!["bash_urls"]).toBe('["https://failed.example.com/x"]');
-  });
-
-  it("PermissionRequest serializes permission_suggestions array", () => {
-    const attrs = mapHookToAttributes(
-      event({
-        hook_event_name: "PermissionRequest",
-        tool_name: "Bash",
-        tool_input: { command: "ls" },
-        permission_suggestions: [{ type: "addRule" }],
-      }),
-    );
-    expect(attrs!["tool_name"]).toBe("Bash");
-    expect(attrs!["permission_suggestions"]).toBe('[{"type":"addRule"}]');
-  });
-
-  it("PermissionRequest emits empty string when suggestions absent", () => {
-    const attrs = mapHookToAttributes(
-      event({
-        hook_event_name: "PermissionRequest",
-        tool_name: "Bash",
-        tool_input: {},
-      }),
-    );
-    expect(attrs!["permission_suggestions"]).toBe("");
-  });
-
-  it("PermissionDenied emits tool_name, use_id, reason", () => {
-    const attrs = mapHookToAttributes(
-      event({
-        hook_event_name: "PermissionDenied",
-        tool_name: "Bash",
-        tool_use_id: "tu_9",
-        tool_input: {},
-        reason: "user declined",
-      }),
-    );
-    expect(attrs!["tool_name"]).toBe("Bash");
-    expect(attrs!["use_id"]).toBe("tu_9");
-    expect(attrs!["reason"]).toBe("user declined");
-  });
-
   it("Notification emits message, title, notification_type", () => {
     const attrs = mapHookToAttributes(
       event({
@@ -294,93 +273,17 @@ describe("mapHookToAttributes — per-event cases", () => {
 
   it("SubagentStart produces only common attrs", () => {
     const attrs = mapHookToAttributes(
-      event({ hook_event_name: "SubagentStart", agent_id: "sa", agent_type: "Explore" }),
+      event({
+        hook_event_name: "SubagentStart",
+        agent_id: "sa",
+        agent_type: "Explore",
+      }),
     );
-    expect(attrs!["agent.id"]).toBe("sa");
+    expect(attrs!["agent_id"]).toBe("sa");
     expect(attrs!["agent.type"]).toBe("Explore");
-    expect(Object.keys(attrs!).every((k) => !k.startsWith("subagent"))).toBe(true);
-  });
-
-  it("SubagentStop emits agent.transcript_path, agent.last_message, stop_hook_active", () => {
-    const attrs = mapHookToAttributes(
-      event({
-        hook_event_name: "SubagentStop",
-        agent_transcript_path: "/path.jsonl",
-        last_assistant_message: "done",
-        stop_hook_active: true,
-      }),
+    expect(Object.keys(attrs!).every((k) => !k.startsWith("subagent"))).toBe(
+      true,
     );
-    expect(attrs!["agent.transcript_path"]).toBe("/path.jsonl");
-    expect(attrs!["agent.last_message"]).toBe("done");
-    expect(attrs!["stop_hook_active"]).toBe("true");
-  });
-
-  it("SubagentStop stop_hook_active coercion for string input", () => {
-    const attrs = mapHookToAttributes(
-      event({
-        hook_event_name: "SubagentStop",
-        agent_transcript_path: "",
-        last_assistant_message: "",
-        stop_hook_active: "FALSE",
-      }),
-    );
-    expect(attrs!["stop_hook_active"]).toBe("false");
-  });
-
-  it("TaskCreated emits task.id, task.subject, task.description, teammate.name, team.name", () => {
-    const attrs = mapHookToAttributes(
-      event({
-        hook_event_name: "TaskCreated",
-        task_id: "t1",
-        task_subject: "Do it",
-        task_description: "Details",
-        teammate_name: "alex",
-        team_name: "eng",
-      }),
-    );
-    expect(attrs!["task.id"]).toBe("t1");
-    expect(attrs!["task.subject"]).toBe("Do it");
-    expect(attrs!["task.description"]).toBe("Details");
-    expect(attrs!["teammate.name"]).toBe("alex");
-    expect(attrs!["team.name"]).toBe("eng");
-  });
-
-  it("TaskCompleted shares TaskCreated's shape", () => {
-    const attrs = mapHookToAttributes(
-      event({
-        hook_event_name: "TaskCompleted",
-        task_id: "t1",
-        task_subject: "Do it",
-        task_description: "Details",
-        teammate_name: "",
-        team_name: "",
-      }),
-    );
-    expect(attrs!["task.id"]).toBe("t1");
-    expect(attrs!["task.subject"]).toBe("Do it");
-  });
-
-  it("Stop produces only common attrs", () => {
-    const attrs = mapHookToAttributes(
-      event({ hook_event_name: "Stop" }),
-    );
-    expect(attrs!["event.name"]).toBe("hooks.Stop");
-    expect("stop_hook_active" in attrs!).toBe(false);
-    expect("last_assistant_message" in attrs!).toBe(false);
-  });
-
-  it("StopFailure emits error, error_details, last_assistant_message", () => {
-    const attrs = mapHookToAttributes(
-      event({
-        hook_event_name: "StopFailure",
-        error: "rate_limit",
-        error_details: "429 Too Many",
-        last_assistant_message: "API Error: Rate limit",
-      }),
-    );
-    expect(attrs!["error"]).toBe("rate_limit");
-    expect(attrs!["error_details"]).toBe("429 Too Many");
-    expect(attrs!["last_assistant_message"]).toBe("API Error: Rate limit");
   });
 
   it("TeammateIdle emits teammate.name and team.name", () => {
@@ -450,56 +353,6 @@ describe("mapHookToAttributes — per-event cases", () => {
     expect(attrs!["new_cwd"]).toBe("/fallback");
   });
 
-  it("FileChanged emits file_path and event (wire field, not change_type)", () => {
-    const attrs = mapHookToAttributes(
-      event({
-        hook_event_name: "FileChanged",
-        file_path: "/foo.txt",
-        event: "change",
-      }),
-    );
-    expect(attrs!["file_path"]).toBe("/foo.txt");
-    expect(attrs!["event"]).toBe("change");
-  });
-
-  it("WorktreeCreate produces only common attrs", () => {
-    const attrs = mapHookToAttributes(
-      event({ hook_event_name: "WorktreeCreate" }),
-    );
-    expect(Object.keys(attrs!)).not.toContain("worktree.path");
-  });
-
-  it("WorktreeRemove emits worktree.path", () => {
-    const attrs = mapHookToAttributes(
-      event({ hook_event_name: "WorktreeRemove", worktree_path: "/wt" }),
-    );
-    expect(attrs!["worktree.path"]).toBe("/wt");
-  });
-
-  it("PreCompact emits trigger and custom_instructions", () => {
-    const attrs = mapHookToAttributes(
-      event({
-        hook_event_name: "PreCompact",
-        trigger: "manual",
-        custom_instructions: "do it",
-      }),
-    );
-    expect(attrs!["trigger"]).toBe("manual");
-    expect(attrs!["custom_instructions"]).toBe("do it");
-  });
-
-  it("PostCompact emits trigger and compact_summary", () => {
-    const attrs = mapHookToAttributes(
-      event({
-        hook_event_name: "PostCompact",
-        trigger: "auto",
-        compact_summary: "summary",
-      }),
-    );
-    expect(attrs!["trigger"]).toBe("auto");
-    expect(attrs!["compact_summary"]).toBe("summary");
-  });
-
   it("Elicitation emits mcp_server_name, message, mode, requested_schema", () => {
     const attrs = mapHookToAttributes(
       event({
@@ -535,153 +388,44 @@ describe("mapHookToAttributes — per-event cases", () => {
   });
 });
 
-describe("mapHookToAttributes — PreToolUse sub-branches", () => {
-  const baseline = (tool: string, toolInput: Record<string, unknown>) =>
-    mapHookToAttributes(
-      event({
-        hook_event_name: "PreToolUse",
-        tool_name: tool,
-        tool_use_id: "tu_1",
-        tool_input: toolInput,
-      }),
-    )!;
-
-  it("baseline emits tool_name, use_id, tool_input", () => {
-    const attrs = baseline("UnknownTool", { anything: 1 });
-    expect(attrs["tool_name"]).toBe("UnknownTool");
-    expect(attrs["use_id"]).toBe("tu_1");
-    expect(attrs["tool_input"]).toBe('{"anything":1}');
-  });
-
-  it("Read sub-branch emits read.file_path", () => {
-    expect(baseline("Read", { file_path: "/x" })["read.file_path"]).toBe("/x");
-  });
-
-  it("Edit sub-branch emits edit.file_path", () => {
-    expect(baseline("Edit", { file_path: "/x" })["edit.file_path"]).toBe("/x");
-  });
-
-  it("Write sub-branch emits write.file_path", () => {
-    expect(baseline("Write", { file_path: "/x" })["write.file_path"]).toBe("/x");
-  });
-
-  it("no sub-branch key added for other tools", () => {
-    const attrs = baseline("Glob", { pattern: "**/*.ts" });
-    expect(attrs["read.file_path"]).toBeUndefined();
-    expect(attrs["edit.file_path"]).toBeUndefined();
-    expect(attrs["write.file_path"]).toBeUndefined();
-  });
-});
-
-describe("mapHookToAttributes — PostToolUse sub-branches", () => {
-  const post = (
-    tool: string,
-    toolInput: Record<string, unknown>,
-    toolResponse: Record<string, unknown> = {},
-  ) =>
+describe("mapHookToAttributes — WebSearch PostToolUse", () => {
+  const webSearch = (toolResponse: Record<string, unknown>) =>
     mapHookToAttributes(
       event({
         hook_event_name: "PostToolUse",
-        tool_name: tool,
+        tool_name: "WebSearch",
         tool_use_id: "tu_2",
-        tool_input: toolInput,
+        tool_input: { query: "q" },
         tool_response: toolResponse,
       }),
     )!;
 
-  it("Agent emits total_duration_ms, total_tokens, total_tool_count", () => {
-    const attrs = post(
-      "Agent",
-      {},
-      { totalDurationMs: 1234, totalTokens: 500, totalToolUseCount: 3 },
-    );
-    expect(attrs["agent.total_duration_ms"]).toBe("1234");
-    expect(attrs["agent.total_tokens"]).toBe("500");
-    expect(attrs["agent.total_tool_count"]).toBe("3");
+  it("emits tool_name, tool_use_id and tool_input", () => {
+    const attrs = webSearch({});
+    expect(attrs["tool_name"]).toBe("WebSearch");
+    expect(attrs["tool_use_id"]).toBe("tu_2");
+    expect(attrs["tool_input"]).toBe('{"query":"q"}');
   });
 
-  it("Agent emits usage breakdown when present", () => {
-    const attrs = post(
-      "Agent",
-      {},
-      {
-        usage: {
-          input_tokens: 100,
-          output_tokens: 200,
-          cache_read_input_tokens: 50,
-        },
-      },
-    );
-    expect(attrs["agent.input_tokens"]).toBe("100");
-    expect(attrs["agent.output_tokens"]).toBe("200");
-    expect(attrs["agent.cache_read_tokens"]).toBe("50");
-  });
-
-  it("Agent omits usage breakdown when usage absent", () => {
-    const attrs = post("Agent", {}, {});
-    expect(attrs["agent.input_tokens"]).toBeUndefined();
-    expect(attrs["agent.output_tokens"]).toBeUndefined();
-    expect(attrs["agent.cache_read_tokens"]).toBeUndefined();
-  });
-
-  it("Agent emits tool_stats when present", () => {
-    const attrs = post("Agent", {}, { toolStats: { Read: 5, Bash: 2 } });
-    expect(attrs["agent.tool_stats"]).toBe('{"Read":5,"Bash":2}');
-  });
-
-  it("WebSearch extracts URLs from results (cap at 10)", () => {
+  it("extracts URLs from results (cap at 10)", () => {
     const results = Array.from({ length: 3 }, (_, r) => ({
       content: Array.from({ length: 5 }, (_, i) => ({
         url: `https://r${r}-${i}.com`,
       })),
     }));
-    const attrs = post("WebSearch", { query: "q" }, { results });
-    const urls = JSON.parse(attrs["search_urls"]!) as string[];
+    const urls = JSON.parse(webSearch({ results })["search_urls"]!) as string[];
     expect(urls).toHaveLength(10);
   });
 
-  it("WebSearch emits search_duration_ms rounded from durationSeconds", () => {
-    const attrs = post("WebSearch", { query: "q" }, { durationSeconds: 2.345 });
-    expect(attrs["search_duration_ms"]).toBe("2345");
+  it("emits search_duration_ms rounded from durationSeconds", () => {
+    expect(webSearch({ durationSeconds: 2.345 })["search_duration_ms"]).toBe(
+      "2345",
+    );
   });
 
-  it("WebSearch with no results and no duration emits neither attr", () => {
-    const attrs = post("WebSearch", { query: "q" }, {});
+  it("with no results and no duration emits neither attr", () => {
+    const attrs = webSearch({});
     expect(attrs["search_urls"]).toBeUndefined();
     expect(attrs["search_duration_ms"]).toBeUndefined();
-  });
-
-  it("WebFetch emits http_status and fetch_bytes when present", () => {
-    const attrs = post("WebFetch", { url: "u", prompt: "p" }, { code: 200, bytes: 4096 });
-    expect(attrs["http_status"]).toBe("200");
-    expect(attrs["fetch_bytes"]).toBe("4096");
-  });
-
-  it("WebFetch omits http_status and fetch_bytes when absent", () => {
-    const attrs = post("WebFetch", { url: "u", prompt: "p" }, {});
-    expect(attrs["http_status"]).toBeUndefined();
-    expect(attrs["fetch_bytes"]).toBeUndefined();
-  });
-
-  it("Bash extracts bash_urls from command", () => {
-    const attrs = post("Bash", { command: "curl https://a.com" }, {});
-    expect(attrs["bash_urls"]).toBe('["https://a.com"]');
-  });
-
-  it("Bash omits bash_urls when command has no URLs", () => {
-    const attrs = post("Bash", { command: "ls -la" }, {});
-    expect(attrs["bash_urls"]).toBeUndefined();
-  });
-
-  it("Read sub-branch emits read.file_path", () => {
-    expect(post("Read", { file_path: "/x" })["read.file_path"]).toBe("/x");
-  });
-
-  it("Edit sub-branch emits edit.file_path", () => {
-    expect(post("Edit", { file_path: "/x" })["edit.file_path"]).toBe("/x");
-  });
-
-  it("Write sub-branch emits write.file_path", () => {
-    expect(post("Write", { file_path: "/x" })["write.file_path"]).toBe("/x");
   });
 });

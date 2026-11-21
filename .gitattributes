@@ -1,0 +1,3 @@
+# vitest (Vite's SSR transform) can't load a file whose shebang line ends in CRLF,
+# so the settings tool keeps LF also on a Windows checkout with core.autocrlf.
+plugin/skills/init-claudalytics/settings-tool.mjs text eol=lf

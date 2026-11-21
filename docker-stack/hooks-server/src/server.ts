@@ -1,7 +1,7 @@
 import * as http from "node:http";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { mapHookToAttributes, EVENTS_TO_EMIT } from "./field-mapping";
+import { mapHookRequest } from "./field-mapping";
 import { emitLog, shutdownOtel } from "./otel-emitter";
 import { runBootstrap, getHealthInfo } from "./migrations";
 import type { HookEvent } from "./hook-events";
@@ -35,7 +35,10 @@ function logSeparator(): void {
   console.log("-".repeat(80));
 }
 
-function truncateForDisplay(text: unknown, max: number = MAX_CLI_DISPLAY): unknown {
+function truncateForDisplay(
+  text: unknown,
+  max: number = MAX_CLI_DISPLAY,
+): unknown {
   if (typeof text !== "string") return text;
   if (text.length <= max) return text;
   return text.slice(0, max) + `... [truncated, ${text.length} chars total]`;
@@ -133,11 +136,14 @@ const server = http.createServer(
 
       let parsed: Record<string, unknown>;
       try {
-        parsed = JSON.parse(rawBody.toString("utf-8")) as Record<string, unknown>;
+        parsed = JSON.parse(rawBody.toString("utf-8")) as Record<
+          string,
+          unknown
+        >;
       } catch {
         console.error(`  #${seq} ERROR: Could not parse JSON body`);
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ continue: true }));
+        res.end("{}");
         return;
       }
 
@@ -153,7 +159,9 @@ const server = http.createServer(
       logSection(
         `#${seq}  [${timestamp()}]  ${hookEvent}  session=${sessionId}`,
       );
-      console.log(`  Path: ${req.url}  |  Body: ${formatBytes(rawBody.length)}`);
+      console.log(
+        `  Path: ${req.url}  |  Body: ${formatBytes(rawBody.length)}`,
+      );
 
       const keySummary = Object.keys(parsed).join(", ");
       console.log(`  Keys: ${keySummary}`);
@@ -196,34 +204,24 @@ const server = http.createServer(
         );
       }
 
-      if (EVENTS_TO_EMIT.has(hookEvent)) {
+      const attrs = mapHookRequest(
+        parsed as unknown as HookEvent,
+        parsedUrl.searchParams.get("via"),
+      );
+      if (attrs) {
         const projectName =
           parsedUrl.searchParams.get("projectName") || "unknown";
-        const attrs = mapHookToAttributes(parsed as unknown as HookEvent);
-        if (attrs) {
-          emitLog(projectName, attrs);
-          console.log(
-            `  OTel: emitted hooks.${hookEvent} (project: ${projectName})`,
-          );
-        }
+        emitLog(projectName, attrs);
+        console.log(
+          `  OTel: emitted hooks.${hookEvent} (project: ${projectName})`,
+        );
       }
 
       console.log(`  Logged to session: ${sessionId}`);
       logSeparator();
 
-      let response: Record<string, unknown> = { continue: true };
-
-      if (hookEvent === "SessionStart") {
-        response = {
-          hookSpecificOutput: {
-            hookEventName: "SessionStart",
-            additionalContext: `[hooks-capture] Logging hooks to ${LOGS_DIR}`,
-          },
-        };
-      }
-
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(response));
+      res.end("{}");
     });
   },
 );
@@ -243,14 +241,11 @@ server.listen(PORT, () => {
   console.log(`${"=".repeat(80)}`);
   console.log("");
   console.log(
-    "  Configure hooks in .claude/settings.local.json (run /init-claudalytics):",
+    "  Hook events are optional (OTel + hooks mode, claudalytics-hook-capture plugin).",
   );
-  console.log('    "hooks": {');
-  console.log('      "EventName": [{"hooks": [{"type": "http",');
   console.log(
-    `        "url": "http://localhost:${PORT}/hook?projectName=YOUR_PROJECT"}]}]`,
+    "  Only requests marked via=hook-capture are sent on to OTel; all are written to the logs dir.",
   );
-  console.log("    }");
   console.log("");
   console.log("Waiting for hook events...\n");
 

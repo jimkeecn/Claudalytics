@@ -1,19 +1,20 @@
 export type PermissionMode =
-  | "default"
-  | "plan"
-  | "acceptEdits"
-  | "auto"
-  | "dontAsk"
-  | "bypassPermissions";
+  "default" | "plan" | "acceptEdits" | "auto" | "dontAsk" | "bypassPermissions";
+
+export interface EffortField {
+  level: string;
+}
 
 export interface HookCommon {
   session_id: string;
   transcript_path: string;
   cwd: string;
   hook_event_name: string;
+  prompt_id?: string;
   permission_mode?: PermissionMode;
   agent_id?: string;
   agent_type?: string;
+  effort?: EffortField;
 }
 
 // ---------- Tool inputs ----------
@@ -166,10 +167,7 @@ export interface PermissionSuggestion {
   rules?: PermissionRule[];
   behavior?: "allow" | "deny" | "ask";
   destination?:
-    | "session"
-    | "localSettings"
-    | "projectSettings"
-    | "userSettings";
+    "session" | "localSettings" | "projectSettings" | "userSettings";
   mode?: string;
 }
 
@@ -252,6 +250,7 @@ export interface PreToolUseEvent extends HookCommon, ToolInvocationFields {
 export interface PostToolUseEvent extends HookCommon, ToolInvocationFields {
   hook_event_name: "PostToolUse";
   tool_response: ToolResponse;
+  duration_ms?: number;
 }
 
 export interface PostToolUseFailureEvent
@@ -259,6 +258,7 @@ export interface PostToolUseFailureEvent
   hook_event_name: "PostToolUseFailure";
   error: string;
   is_interrupt?: boolean;
+  duration_ms?: number;
 }
 
 export interface PermissionRequestEvent extends HookCommon, ToolRefFields {
@@ -276,10 +276,7 @@ export interface NotificationEvent extends HookCommon, MessageField {
   hook_event_name: "Notification";
   title?: string;
   notification_type:
-    | "permission_prompt"
-    | "idle_prompt"
-    | "auth_success"
-    | "elicitation_dialog";
+    "permission_prompt" | "idle_prompt" | "auth_success" | "elicitation_dialog";
 }
 
 export interface SubagentStartEvent
@@ -384,16 +381,13 @@ export interface PostCompactEvent extends HookCommon, CompactTriggerField {
 }
 
 export interface ElicitationEvent
-  extends HookCommon,
-    McpInteractionFields,
-    MessageField {
+  extends HookCommon, McpInteractionFields, MessageField {
   hook_event_name: "Elicitation";
   requested_schema: unknown;
 }
 
 export interface ElicitationResultEvent
-  extends HookCommon,
-    McpInteractionFields {
+  extends HookCommon, McpInteractionFields {
   hook_event_name: "ElicitationResult";
   action: string;
   content: Record<string, unknown>;
@@ -461,6 +455,13 @@ export interface PreToolUseOutput extends HookOutputCommon {
     permissionDecisionReason?: string;
     updatedInput?: ToolInput;
     additionalContext?: string;
+  };
+}
+
+export interface PostToolUseOutput extends HookOutputCommon {
+  hookSpecificOutput: {
+    hookEventName: "PostToolUse";
+    updatedToolOutput?: string;
   };
 }
 

@@ -14,6 +14,98 @@ processors:
   batch:
     timeout: 5s
     send_batch_size: 1000
+  # Privacy: when a tool reads a credential-like file, Claude Code puts the file
+  # text in the tool.output event of the claude_code.tool span. This processor
+  # puts a fixed marker in its place. The span itself and the tool_result log
+  # event stay, so credential_exposures still gets its row.
+  #   Read / Write / Edit   span attribute file_path, event attribute content or diff
+  #   Bash                  span attribute full_command, event attribute output
+  # The file path is tested as "cat <path>", so one pattern serves both cases.
+  #
+  # KEEP IN SYNC with the pattern list of credential_exposures_otel_mv in
+  # clickhouse/init/013_otel_mvs.sql: the same read commands and the same
+  # file names. Change both files together.
+  # What OTTL makes different from the view:
+  #   - there is no word split, so a name that ends with $ in the view must end
+  #     here at a space, a quote, ) ; & | or the end of the text;
+  #   - a path is not changed to forward slashes, so / and \ are both a separator;
+  #   - the names are in four groups: after a separator or anywhere in the word,
+  #     each with or without an end;
+  #   - an OTTL string needs \\ for one regex backslash.
+  transform/redact_credential_content:
+    error_mode: ignore
+    trace_statements:
+      - context: spanevent
+        conditions:
+          - >-
+            IsMatch(
+              Concat(["cat ", span.attributes["file_path"], "\n", span.attributes["full_command"]], ""),
+              Concat([
+                "(?:^|[;&|({\\n`]|\\b(?:then|do|else|sudo)\\s)\\s*(?i:cat|type|head|tail|less|more|get-content|gc)\\s+",
+                "(?:",
+                "(?:[^;&|\\n]*[\\s/\\\\\"'])?(?:",
+                "\\.env",
+                "|\\.env\\.[^\\s/\\\\\"']+",
+                "|appsettings\\.[^\\s/\\\\\"']+\\.json",
+                "|secrets\\.json",
+                "|local\\.settings\\.json",
+                "|\\.aws[/\\\\]credentials",
+                "|\\.aws[/\\\\]config",
+                "|\\.kube[/\\\\]config",
+                "|credentials\\.json",
+                "|credentials\\.yaml",
+                "|service[-_]?account[^\\s/\\\\\"']*\\.json",
+                "|token\\.json",
+                "|\\.npmrc",
+                "|\\.pypirc",
+                "|\\.gemrc",
+                "|\\.nuget[/\\\\]NuGet\\.Config",
+                "|\\.netrc",
+                "|\\.pgpass",
+                "|\\.my\\.cnf",
+                "|\\.htpasswd",
+                "|\\.docker[/\\\\]config\\.json",
+                "|\\.dockercfg",
+                "|kubeconfig",
+                "|vault\\.ya?ml",
+                "|keystore\\.properties",
+                "|local\\.properties",
+                "|secrets\\.ya?ml",
+                "|secrets?\\.toml",
+                ")(?:[\\s\"');&|]|$)",
+                "|(?:[^;&|\\n]*[\\s/\\\\\"'])?(?:",
+                "terraform\\.tfstate",
+                "|id_(?:rsa|ed25519|ecdsa|dsa)",
+                "|\\.github[/\\\\]secrets",
+                ")",
+                "|[^;&|\\n]*(?:",
+                "\\.tfvars",
+                "|\\.pem",
+                "|\\.key",
+                "|\\.p12",
+                "|\\.pfx",
+                "|\\.jks",
+                ")(?:[\\s\"');&|]|$)",
+                "|[^;&|\\n]*vault[-_]pass",
+                ")"
+              ], ""))
+        statements:
+          - 'set(attributes["content"], "[redacted: credential file]") where attributes["content"] != nil'
+          - 'set(attributes["output"], "[redacted: credential file]") where attributes["output"] != nil'
+          - 'set(attributes["diff"], "[redacted: credential file]") where attributes["diff"] != nil'
+
+  # Every log record says where it came from, in the attribute event.source:
+  #   otel                 Claude Code's own OTel export (set here)
+  #   hook                 the hook-capture plugin (set by the hooks server)
+  #   transcript_backfill  npm run backfill (set by the backfill tool)
+  # Hook rows and backfill rows pass through this collector too, so the value is
+  # set only on a record that has none. It never replaces a value.
+  transform/event_source:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - 'set(attributes["event.source"], "otel") where attributes["event.source"] == nil'
 
 exporters:
   clickhouse:
@@ -36,9 +128,9 @@ service:
       exporters: [clickhouse, debug]
     logs:
       receivers: [otlp]
-      processors: [batch]
+      processors: [transform/event_source, batch]
       exporters: [clickhouse, debug]
     traces:
       receivers: [otlp]
-      processors: [batch]
+      processors: [transform/redact_credential_content, batch]
       exporters: [clickhouse, debug]
