@@ -1,0 +1,10 @@
+<!--
+  Test stack only (mounted by docker-compose.test.yaml).
+  The seeded copy of the live data is past its 90-day TTL, so TTL merges at startup
+  would delete it before SYSTEM STOP TTL MERGES can run. 0 means no TTL merge is assigned.
+-->
+<clickhouse>
+    <merge_tree>
+        <max_number_of_merges_with_ttl_in_pool>0</max_number_of_merges_with_ttl_in_pool>
+    </merge_tree>
+</clickhouse>

@@ -1,0 +1,44 @@
+# Test stack for development and migration tests. It never shares a name,
+# volume, image or port with the live stack. Always pass both files, in this order:
+#   docker compose -f docker-compose.yaml -f docker-compose.test.yaml <command>
+# A command with only the base file, or with the files in the other order, targets the live project.
+name: claudalytics-test
+
+services:
+  clickhouse:
+    container_name: cctest-clickhouse
+    restart: "no"
+    ports: !override
+      - "127.0.0.1:18123:8123"
+      - "127.0.0.1:19000:9000"
+    volumes:
+      - ./clickhouse/test-no-ttl-merges.xml:/etc/clickhouse-server/config.d/test-no-ttl-merges.xml:ro
+
+  otel-collector:
+    container_name: cctest-otel
+    restart: "no"
+    ports: !override
+      - "127.0.0.1:14317:4317"
+      - "127.0.0.1:14318:4318"
+      - "127.0.0.1:14133:13133"
+
+  hooks-server:
+    image: cctest-hooks:latest
+    container_name: cctest-hooks
+    restart: "no"
+    ports: !override
+      - "127.0.0.1:14319:4319"
+
+  grafana:
+    container_name: cctest-grafana
+    restart: "no"
+    ports: !override
+      - "127.0.0.1:23000:3000"
+
+volumes:
+  claudalytics-clickhouse-data:
+    name: cctest-clickhouse-data
+  claudalytics-grafana-data:
+    name: cctest-grafana-data
+  claudalytics-hooks-logs:
+    name: cctest-hooks-logs

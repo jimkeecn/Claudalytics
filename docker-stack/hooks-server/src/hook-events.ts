@@ -1,10 +1,5 @@
 export type PermissionMode =
-  | "default"
-  | "plan"
-  | "acceptEdits"
-  | "auto"
-  | "dontAsk"
-  | "bypassPermissions";
+  "default" | "plan" | "acceptEdits" | "auto" | "dontAsk" | "bypassPermissions";
 
 export interface EffortField {
   level: string;
@@ -15,6 +10,7 @@ export interface HookCommon {
   transcript_path: string;
   cwd: string;
   hook_event_name: string;
+  prompt_id?: string;
   permission_mode?: PermissionMode;
   agent_id?: string;
   agent_type?: string;
@@ -171,10 +167,7 @@ export interface PermissionSuggestion {
   rules?: PermissionRule[];
   behavior?: "allow" | "deny" | "ask";
   destination?:
-    | "session"
-    | "localSettings"
-    | "projectSettings"
-    | "userSettings";
+    "session" | "localSettings" | "projectSettings" | "userSettings";
   mode?: string;
 }
 
@@ -283,10 +276,7 @@ export interface NotificationEvent extends HookCommon, MessageField {
   hook_event_name: "Notification";
   title?: string;
   notification_type:
-    | "permission_prompt"
-    | "idle_prompt"
-    | "auth_success"
-    | "elicitation_dialog";
+    "permission_prompt" | "idle_prompt" | "auth_success" | "elicitation_dialog";
 }
 
 export interface SubagentStartEvent
